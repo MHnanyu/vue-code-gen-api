@@ -66,6 +66,25 @@ async def generate_code(body: GenerateRequest):
     main_page_content = generate_main_page_content(body.prompt)
     ai_message = generate_mock_ai_response(body.prompt)
     
+    files = [
+        GeneratedFile(
+            id="main-page",
+            name="MainPage.vue",
+            path="/src/MainPage.vue",
+            type="file",
+            language="vue",
+            content=main_page_content
+        ),
+        GeneratedFile(
+            id="hello-world",
+            name="HelloWorld.vue",
+            path="/src/HelloWorld.vue",
+            type="file",
+            language="vue",
+            content=HELLO_WORLD_VUE
+        ),
+    ]
+    
     if body.sessionId:
         now = datetime.utcnow()
         
@@ -89,7 +108,10 @@ async def generate_code(body: GenerateRequest):
                 "$push": {
                     "messages": {"$each": [user_msg, assistant_msg]}
                 },
-                "$set": {"updatedAt": now}
+                "$set": {
+                    "files": [f.model_dump() for f in files],
+                    "updatedAt": now
+                }
             }
         )
         
@@ -99,24 +121,5 @@ async def generate_code(body: GenerateRequest):
                 status_code=404,
                 detail={"code": ErrorCode.SESSION_NOT_FOUND, "message": "会话不存在", "data": None}
             )
-    
-    files = [
-        GeneratedFile(
-            id="main-page",
-            name="MainPage.vue",
-            path="/src/MainPage.vue",
-            type="file",
-            language="vue",
-            content=main_page_content
-        ),
-        GeneratedFile(
-            id="hello-world",
-            name="HelloWorld.vue",
-            path="/src/HelloWorld.vue",
-            type="file",
-            language="vue",
-            content=HELLO_WORLD_VUE
-        ),
-    ]
     
     return Response(data=GenerateResponseData(files=files, message=ai_message))

@@ -1,15 +1,13 @@
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field
+from app.schemas.message import CodeFile
 
 
-class MessageBase(BaseModel):
+class Message(BaseModel):
+    id: str = Field(default_factory=lambda: str(__import__("uuid").uuid4()))
     role: str
     content: str
-
-
-class Message(MessageBase):
-    id: str = Field(default_factory=lambda: str(__import__("uuid").uuid4()))
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -26,6 +24,7 @@ class Session(BaseModel):
     userId: Optional[str] = None
     title: Optional[str] = None
     messages: List[Message] = []
+    files: Optional[List[CodeFile]] = None
     createdAt: datetime = Field(default_factory=datetime.utcnow)
     updatedAt: datetime = Field(default_factory=datetime.utcnow)
 
