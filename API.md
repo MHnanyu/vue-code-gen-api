@@ -39,7 +39,12 @@ GET /health
 
 ### 1.1 生成代码
 
-根据用户需求描述生成 Vue3 项目代码。
+根据用户需求描述生成 Vue3 组件代码。
+
+**重要说明**：
+- API 只返回**动态生成的 Vue 组件文件**（扁平数组）
+- 完整的项目结构（包含 main.ts、App.vue、package.json 等）由前端通过 `buildProjectFiles()` 组合
+- 第一个文件始终是 `MainPage.vue`，后续文件为其他组件
 
 **请求**
 
@@ -71,23 +76,23 @@ POST /api/generate
   "data": {
     "files": [
       {
-        "id": "app-vue",
-        "name": "App.vue",
-        "path": "/src/App.vue",
+        "id": "main-page",
+        "name": "MainPage.vue",
+        "path": "/src/MainPage.vue",
         "type": "file",
         "language": "vue",
         "content": "<template>...</template>"
       },
       {
-        "id": "main-ts",
-        "name": "main.ts",
-        "path": "/src/main.ts",
+        "id": "hello-world",
+        "name": "HelloWorld.vue",
+        "path": "/src/HelloWorld.vue",
         "type": "file",
-        "language": "typescript",
-        "content": "import { createApp }..."
+        "language": "vue",
+        "content": "<template>...</template>"
       }
     ],
-    "message": "我已根据您的需求生成了登录页面代码..."
+    "message": "我理解您的需求..."
   }
 }
 ```
@@ -99,10 +104,31 @@ POST /api/generate
 | id | string | 文件唯一标识 |
 | name | string | 文件名 |
 | path | string | 文件路径 |
-| type | string | 类型：file / folder |
-| language | string | 语言：vue / typescript / javascript / css / html / json |
+| type | string | 类型：file（始终为 file） |
+| language | string | 语言：vue（始终为 vue） |
 | content | string | 文件内容 |
-| children | array | 子文件/文件夹（type=folder 时） |
+
+**前端使用示例**
+
+```typescript
+import { generateCode, transformApiFiles } from '@/api'
+import { buildProjectFiles } from '@/templates/project-template'
+
+// 调用 API
+const result = await generateCode({ prompt, componentLib, sessionId })
+
+// 转换并构建完整项目
+const mainPageContent = result.files[0].content
+const extraFiles = result.files.slice(1).map(f => ({
+  id: f.id,
+  name: f.name,
+  path: f.path,
+  type: f.type,
+  language: f.language,
+  content: f.content
+}))
+const projectFiles = buildProjectFiles(mainPageContent, extraFiles)
+```
 
 ---
 

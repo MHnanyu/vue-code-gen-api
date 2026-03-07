@@ -13,8 +13,8 @@ class GeneratedFile(BaseModel):
     name: str
     path: str
     type: str
-    language: str
-    content: str
+    language: Optional[str] = None
+    content: Optional[str] = None
     children: Optional[List["GeneratedFile"]] = None
 
 
