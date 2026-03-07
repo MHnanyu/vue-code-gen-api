@@ -39,12 +39,13 @@ GET /health
 
 ### 1.1 生成代码
 
-根据用户需求描述生成 Vue3 组件代码。
+根据用户需求描述生成 Vue3 组件代码，支持多轮对话迭代修改。
 
 **重要说明**：
 - API 只返回**动态生成的 Vue 组件文件**（扁平数组）
 - 完整的项目结构（包含 main.ts、App.vue、package.json 等）由前端通过 `buildProjectFiles()` 组合
 - 第一个文件始终是 `MainPage.vue`，后续文件为其他组件
+- 支持二次提问：传入之前的 `files` 可以基于现有代码进行修改
 
 **请求**
 
@@ -58,7 +59,8 @@ POST /api/generate
 {
   "prompt": "生成一个登录页面，包含用户名密码输入框、记住我选项和第三方登录",
   "componentLib": "ElementUI",
-  "sessionId": "可选，如果是对话上下文则传入会话ID"
+  "sessionId": "可选，如果是对话上下文则传入会话ID",
+  "files": "可选，之前的文件列表，用于二次修改"
 }
 ```
 
@@ -66,7 +68,46 @@ POST /api/generate
 |------|------|------|------|
 | prompt | string | 是 | 用户需求描述 |
 | componentLib | string | 否 | 组件库，默认 ElementUI，可选 AUI |
-| sessionId | string | 否 | 会话ID，用于保持上下文 |
+| sessionId | string | 否 | 会话ID，用于保持上下文和保存对话记录 |
+| files | array | 否 | 之前生成的文件列表，用于二次修改时传入 |
+
+**请求示例**
+
+**首次生成（无 files）**：
+```json
+{
+  "prompt": "生成一个登录页面",
+  "componentLib": "ElementUI",
+  "sessionId": "xxx-xxx-xxx"
+}
+```
+
+**二次修改（带 files）**：
+```json
+{
+  "prompt": "给登录页面添加一个注册按钮",
+  "componentLib": "ElementUI",
+  "sessionId": "xxx-xxx-xxx",
+  "files": [
+    {
+      "id": "main-page",
+      "name": "MainPage.vue",
+      "path": "/src/MainPage.vue",
+      "type": "file",
+      "language": "vue",
+      "content": "<template>...</template>"
+    },
+    {
+      "id": "hello-world",
+      "name": "HelloWorld.vue",
+      "path": "/src/HelloWorld.vue",
+      "type": "file",
+      "language": "vue",
+      "content": "<template>...</template>"
+    }
+  ]
+}
+```
 
 **响应**
 
@@ -111,23 +152,38 @@ POST /api/generate
 **前端使用示例**
 
 ```typescript
-import { generateCode, transformApiFiles } from '@/api'
+import { generateCode } from '@/api'
 import { buildProjectFiles } from '@/templates/project-template'
 
-// 调用 API
-const result = await generateCode({ prompt, componentLib, sessionId })
+// 首次生成
+async function handleFirstGenerate(prompt: string, sessionId: string) {
+  const result = await generateCode({ prompt, componentLib: 'ElementUI', sessionId })
+  
+  // 构建完整项目
+  const mainPageContent = result.files[0].content
+  const extraFiles = result.files.slice(1)
+  const projectFiles = buildProjectFiles(mainPageContent, extraFiles)
+  
+  // 保存 files 用于下次修改
+  return { projectFiles, generatedFiles: result.files }
+}
 
-// 转换并构建完整项目
-const mainPageContent = result.files[0].content
-const extraFiles = result.files.slice(1).map(f => ({
-  id: f.id,
-  name: f.name,
-  path: f.path,
-  type: f.type,
-  language: f.language,
-  content: f.content
-}))
-const projectFiles = buildProjectFiles(mainPageContent, extraFiles)
+// 二次修改
+async function handleModify(prompt: string, sessionId: string, previousFiles: File[]) {
+  const result = await generateCode({ 
+    prompt, 
+    componentLib: 'ElementUI', 
+    sessionId,
+    files: previousFiles  // 传入之前的文件
+  })
+  
+  // 构建更新后的项目
+  const mainPageContent = result.files[0].content
+  const extraFiles = result.files.slice(1)
+  const projectFiles = buildProjectFiles(mainPageContent, extraFiles)
+  
+  return { projectFiles, generatedFiles: result.files }
+}
 ```
 
 ---

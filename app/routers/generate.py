@@ -54,36 +54,62 @@ const selectedDate = ref(new Date())
 """
 
 
-def generate_mock_ai_response(user_message: str) -> str:
+def generate_mock_ai_response(user_message: str, is_update: bool = False) -> str:
     truncated = user_message[:50] if len(user_message) > 50 else user_message
-    return f'我理解您的需求："{truncated}..."。我已经为您生成了相应的Vue3项目代码，您可以在右侧的"Code"标签页查看完整的文件结构。'
+    if is_update:
+        responses = [
+            f'好的，我已根据您的要求"{truncated}..."更新了代码。',
+            f'代码已更新！您的要求"{truncated}..."已应用到项目中。',
+            f'修改完成！"{truncated}..."相关的功能已添加。',
+        ]
+    else:
+        responses = [
+            f'我理解您的需求："{truncated}..."。我已经为您生成了相应的Vue3项目代码，您可以在右侧的"Code"标签页查看完整的文件结构。',
+            f'根据您的要求，我已经生成了项目代码。',
+        ]
+    import random
+    return random.choice(responses)
 
 
 @router.post("/generate")
 async def generate_code(body: GenerateRequest):
     db = get_database()
     
-    main_page_content = generate_main_page_content(body.prompt)
-    ai_message = generate_mock_ai_response(body.prompt)
+    ai_message = generate_mock_ai_response(
+        body.prompt, 
+        is_update=bool(body.files and len(body.files) > 0)
+    )
     
-    files = [
-        GeneratedFile(
-            id="main-page",
-            name="MainPage.vue",
-            path="/src/MainPage.vue",
-            type="file",
-            language="vue",
-            content=main_page_content
-        ),
-        GeneratedFile(
-            id="hello-world",
-            name="HelloWorld.vue",
-            path="/src/HelloWorld.vue",
-            type="file",
-            language="vue",
-            content=HELLO_WORLD_VUE
-        ),
-    ]
+    if body.files and len(body.files) > 0:
+        files = body.files
+        main_page = next((f for f in files if f.name == "MainPage.vue"), None)
+        if main_page and main_page.content:
+            original_content = main_page.content
+            if "</blockquote>" in original_content:
+                parts = original_content.split("</blockquote>")
+                if len(parts) > 1:
+                    update_note = f"\n\n    <!-- 更新: {body.prompt} -->\n"
+                    parts[0] = parts[0].rstrip() + update_note
+                    main_page.content = parts[0] + "\n</blockquote>" + "</blockquote>".join(parts[1:])
+    else:
+        files = [
+            GeneratedFile(
+                id="main-page",
+                name="MainPage.vue",
+                path="/src/MainPage.vue",
+                type="file",
+                language="vue",
+                content=generate_main_page_content(body.prompt)
+            ),
+            GeneratedFile(
+                id="hello-world",
+                name="HelloWorld.vue",
+                path="/src/HelloWorld.vue",
+                type="file",
+                language="vue",
+                content=HELLO_WORLD_VUE
+            ),
+        ]
     
     if body.sessionId:
         now = datetime.utcnow()
@@ -102,17 +128,19 @@ async def generate_code(body: GenerateRequest):
             "timestamp": now
         }
         
+        update_data = {
+            "$push": {
+                "messages": {"$each": [user_msg, assistant_msg]}
+            },
+            "$set": {
+                "updatedAt": now,
+                "files": [f.model_dump() for f in files]
+            }
+        }
+        
         result = await db.sessions.update_one(
             {"id": body.sessionId},
-            {
-                "$push": {
-                    "messages": {"$each": [user_msg, assistant_msg]}
-                },
-                "$set": {
-                    "files": [f.model_dump() for f in files],
-                    "updatedAt": now
-                }
-            }
+            update_data
         )
         
         if result.matched_count == 0:
