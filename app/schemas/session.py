@@ -40,3 +40,7 @@ class SessionListItem(BaseModel):
 class SessionListResponse(BaseModel):
     total: int
     list: List[SessionListItem]
+
+
+class SessionFilesUpdate(BaseModel):
+    files: List[CodeFile]

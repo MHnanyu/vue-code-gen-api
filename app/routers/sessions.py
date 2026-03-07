@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query
@@ -7,7 +6,8 @@ from fastapi import APIRouter, HTTPException, Query
 from app.database import get_database
 from app.schemas.response import Response, ErrorCode
 from app.schemas.session import (
-    Session, SessionCreate, SessionUpdate, SessionListItem, SessionListResponse
+    Session, SessionCreate, SessionUpdate, SessionListItem, SessionListResponse,
+    SessionFilesUpdate
 )
 from app.schemas.message import MessageCreate
 from app.schemas.session import Message
@@ -111,3 +111,18 @@ async def add_message(sessionId: str, body: MessageCreate):
         )
     
     return Response(data=message)
+
+
+@router.patch("/{sessionId}/files", response_model=Response)
+async def update_session_files(sessionId: str, body: SessionFilesUpdate):
+    db = get_database()
+    result = await db.sessions.update_one(
+        {"id": sessionId},
+        {"$set": {"files": [f.model_dump() for f in body.files], "updatedAt": datetime.utcnow()}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail=Response(code=ErrorCode.SESSION_NOT_FOUND, message="会话不存在").model_dump()
+        )
+    return Response(message="更新成功")
