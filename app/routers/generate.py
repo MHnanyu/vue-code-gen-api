@@ -1,115 +1,112 @@
-import html
+import logging
 from datetime import datetime
 from uuid import uuid4
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from app.database import get_database
 from app.schemas.response import Response, ErrorCode
 from app.schemas.generate import GenerateRequest, GenerateResponseData, GeneratedFile
+from app.services.ai_factory import AIServiceFactory
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["generate"])
 
 
-def generate_main_page_content(prompt: str) -> str:
-    escaped_prompt = html.escape(prompt)
-    return f"""<template>
-  <div class="max-w-3xl mx-auto p-10">
-    <h1 class="text-2xl font-bold text-gray-800 mb-4">{{{{ title }}}}</h1>
-    <p class="text-gray-600">基于您的需求生成的内容：</p>
-    <blockquote class="bg-gray-100 p-4 border-l-4 border-emerald-500 my-5 text-gray-500">
-      {{{{ userPrompt }}}}
-    </blockquote>
-    <HelloWorld />
+def convert_api_files_to_generated(api_files: list[dict]) -> list[GeneratedFile]:
+    """将API返回的文件列表转换为GeneratedFile对象"""
+    return [
+        GeneratedFile(
+            id=file.get("id", f"file-{i}"),
+            name=file.get("name", f"file{i}.vue"),
+            path=file.get("path", f"/src/{file.get('name', f'file{i}.vue')}"),
+            type=file.get("type", "file"),
+            language=file.get("language", "vue"),
+            content=file.get("content", ""),
+            children=file.get("children")
+        )
+        for i, file in enumerate(api_files)
+    ]
+
+
+@router.post("/generate")
+async def generate_code(body: GenerateRequest):
+    logger.info(f"收到生成请求 - sessionId: {body.sessionId}, prompt长度: {len(body.prompt)}, 文件数: {len(body.files) if body.files else 0}")
+    
+    db = get_database()
+    
+    if db is None:
+        logger.error("数据库未连接")
+        raise HTTPException(
+            status_code=500,
+            detail={"code": ErrorCode.INTERNAL_ERROR, "message": "数据库未连接", "data": None}
+        )
+    
+    try:
+        ai_service = AIServiceFactory.get_service()
+        
+        existing_files = None
+        if body.files and len(body.files) > 0:
+            existing_files = [f.model_dump() for f in body.files]
+        
+        logger.info("开始调用AI服务生成代码")
+        result = await ai_service.generate_vue_files(
+            prompt=body.prompt,
+            existing_files=existing_files
+        )
+        logger.info("AI服务调用完成")
+        
+        api_files = result.get("files", [])
+        ai_message = result.get("message", "代码生成完成")
+        
+        files = convert_api_files_to_generated(api_files)
+        
+        if not files:
+            ai_message = "未能生成有效的代码文件，请尝试更详细的需求描述"
+            logger.warning(f"AI未生成有效文件 - prompt: {body.prompt[:100]}..., result: {result}")
+        else:
+            logger.info(f"成功生成 {len(files)} 个文件 - message: {ai_message}")
+        
+    except ValueError as e:
+        logger.error(f"AI服务配置错误: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail={"code": ErrorCode.INTERNAL_ERROR, "message": f"AI服务配置错误: {str(e)}", "data": None}
+        )
+    except Exception as e:
+        import traceback
+        logger.error(f"AI生成失败: {str(e)}\n{traceback.format_exc()}")
+        ai_message = f"AI生成失败: {str(e)}"
+        
+        if body.files and len(body.files) > 0:
+            files = body.files
+        else:
+            escaped_prompt = body.prompt.replace('"', '\\"')
+            files = [
+                GeneratedFile(
+                    id="error-page",
+                    name="MainPage.vue",
+                    path="/src/MainPage.vue",
+                    type="file",
+                    language="vue",
+                    content=f"""<template>
+  <div class="p-6">
+    <el-alert
+      title="生成失败"
+      type="error"
+      description="{ai_message}"
+      show-icon
+    />
+    <p class="mt-4 text-gray-600">原始需求：{escaped_prompt}</p>
   </div>
 </template>
 
 <script setup lang="ts">
 import {{ ref }} from 'vue'
-import HelloWorld from './HelloWorld.vue'
-
-const title = ref('Generated Page')
-const userPrompt = ref('{escaped_prompt}')
-</script>
-"""
-
-
-HELLO_WORLD_VUE = """<template>
-  <div class="p-5 bg-white rounded-lg shadow-md">
-    <h2 class="text-xl text-emerald-500 mb-4">Hello World Component</h2>
-    <p class="text-gray-700 mb-2">Count: {{ count }}</p>
-    <el-button type="primary" @click="count++">Click Me</el-button>
-    <el-divider />
-    <h3 class="my-4 text-gray-600">Calendar</h3>
-    <el-calendar v-model="selectedDate" class="rounded-lg" />
-  </div>
-</template>
-
-<script setup lang="ts">
-import { ref } from 'vue'
-
-const count = ref(0)
-const selectedDate = ref(new Date())
-</script>
-"""
-
-
-def generate_mock_ai_response(user_message: str, is_update: bool = False) -> str:
-    truncated = user_message[:50] if len(user_message) > 50 else user_message
-    if is_update:
-        responses = [
-            f'好的，我已根据您的要求"{truncated}..."更新了代码。',
-            f'代码已更新！您的要求"{truncated}..."已应用到项目中。',
-            f'修改完成！"{truncated}..."相关的功能已添加。',
-        ]
-    else:
-        responses = [
-            f'我理解您的需求："{truncated}..."。我已经为您生成了相应的Vue3项目代码，您可以在右侧的"Code"标签页查看完整的文件结构。',
-            f'根据您的要求，我已经生成了项目代码。',
-        ]
-    import random
-    return random.choice(responses)
-
-
-@router.post("/generate")
-async def generate_code(body: GenerateRequest):
-    db = get_database()
-    
-    ai_message = generate_mock_ai_response(
-        body.prompt, 
-        is_update=bool(body.files and len(body.files) > 0)
-    )
-    
-    if body.files and len(body.files) > 0:
-        files = body.files
-        main_page = next((f for f in files if f.name == "MainPage.vue"), None)
-        if main_page and main_page.content:
-            original_content = main_page.content
-            if "</blockquote>" in original_content:
-                parts = original_content.split("</blockquote>")
-                if len(parts) > 1:
-                    update_note = f"\n\n    <!-- 更新: {body.prompt} -->\n"
-                    parts[0] = parts[0].rstrip() + update_note
-                    main_page.content = parts[0] + "\n</blockquote>" + "</blockquote>".join(parts[1:])
-    else:
-        files = [
-            GeneratedFile(
-                id="main-page",
-                name="MainPage.vue",
-                path="/src/MainPage.vue",
-                type="file",
-                language="vue",
-                content=generate_main_page_content(body.prompt)
-            ),
-            GeneratedFile(
-                id="hello-world",
-                name="HelloWorld.vue",
-                path="/src/HelloWorld.vue",
-                type="file",
-                language="vue",
-                content=HELLO_WORLD_VUE
-            ),
-        ]
+</script>"""
+                )
+            ]
     
     if body.sessionId:
         now = datetime.utcnow()
@@ -138,16 +135,18 @@ async def generate_code(body: GenerateRequest):
             }
         }
         
-        result = await db.sessions.update_one(
+        update_result = await db.sessions.update_one(
             {"id": body.sessionId},
             update_data
         )
         
-        if result.matched_count == 0:
-            from fastapi import HTTPException
+        if update_result.matched_count == 0:
+            logger.error(f"会话不存在 - sessionId: {body.sessionId}")
             raise HTTPException(
                 status_code=404,
                 detail={"code": ErrorCode.SESSION_NOT_FOUND, "message": "会话不存在", "data": None}
             )
+        
+        logger.info(f"会话更新成功 - sessionId: {body.sessionId}")
     
     return Response(data=GenerateResponseData(files=files, message=ai_message))
