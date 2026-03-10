@@ -238,13 +238,15 @@ POST /api/sessions
 
 ```json
 {
-  "title": "登录页面生成"
+  "title": "登录页面生成",
+  "componentLib": "ElementUI"
 }
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | title | string | 否 | 会话标题 |
+| componentLib | string | 否 | 选择的组件库，可选值：`ElementUI`、`aui`、`ccui` |
 
 **响应**
 
@@ -255,6 +257,7 @@ POST /api/sessions
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "userId": null,
     "title": "登录页面生成",
+    "componentLib": "ElementUI",
     "messages": [],
     "createdAt": "2024-01-15T10:30:00Z",
     "updatedAt": "2024-01-15T10:30:00Z"
@@ -289,6 +292,7 @@ GET /api/sessions?page=1&pageSize=20
         "id": "550e8400-e29b-41d4-a716-446655440000",
         "userId": null,
         "title": "登录页面生成",
+        "componentLib": "ElementUI",
         "createdAt": "2024-01-15T10:30:00Z",
         "updatedAt": "2024-01-15T10:30:00Z"
       }
