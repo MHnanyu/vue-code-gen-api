@@ -1,5 +1,5 @@
-from typing import Optional, List
-from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field
 
 
 class GeneratedFile(BaseModel):
@@ -12,13 +12,31 @@ class GeneratedFile(BaseModel):
     children: Optional[List["GeneratedFile"]] = None
 
 
-class GenerateRequest(BaseModel):
+class GenerateInitialRequest(BaseModel):
     prompt: str
-    componentLib: Optional[str] = "ElementUI"
     sessionId: Optional[str] = None
-    files: Optional[List[GeneratedFile]] = None
+    debug: bool = False
+
+
+class GenerateIterateRequest(BaseModel):
+    prompt: str
+    sessionId: Optional[str] = None
+    files: List[GeneratedFile]
 
 
 class GenerateResponseData(BaseModel):
     files: List[GeneratedFile]
     message: str
+
+
+class StageResult(BaseModel):
+    status: str
+    duration: Optional[float] = None
+    output: Optional[str] = None
+    error: Optional[str] = None
+
+
+class GenerateInitialResponseData(BaseModel):
+    files: List[GeneratedFile]
+    message: str
+    stages: Optional[Dict[str, StageResult]] = None

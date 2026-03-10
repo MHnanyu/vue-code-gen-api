@@ -288,7 +288,7 @@ python -m uvicorn app.main:app --port 8000
 修改启动命令中的 `--port` 参数：
 
 ```bash
-python -m uvicorn app.main:app --reload --port 8001
+python -m uvicorn app.main:app --reload --port 8000
 ```
 
 ### 数据库初始化失败

@@ -37,20 +37,19 @@ GET /health
 
 ## 1. AI 代码生成
 
-### 1.1 生成代码
+### 1.1 初始生成代码（新会话）
 
-根据用户需求描述生成 Vue3 组件代码，支持多轮对话迭代修改。
+根据用户需求描述生成 Vue3 组件代码，走三阶段流程（需求标准化 → 代码生成 → UX优化）。
 
 **重要说明**：
-- API 只返回**动态生成的 Vue 组件文件**（扁平数组）
-- 完整的项目结构（包含 main.ts、App.vue、package.json 等）由前端通过 `buildProjectFiles()` 组合
-- 第一个文件始终是 `MainPage.vue`，后续文件为其他组件
-- 支持二次提问：传入之前的 `files` 可以基于现有代码进行修改
+- 此接口用于**新会话首次生成**，不传已有文件
+- 走三步骤流程：步骤1 需求标准化 → 步骤2 代码生成 → 步骤3 UX优化
+- 后续迭代修改请使用 `/api/generate/iterate` 接口
 
 **请求**
 
 ```
-POST /api/generate
+POST /api/generate/initial
 ```
 
 **请求体**
@@ -58,56 +57,16 @@ POST /api/generate
 ```json
 {
   "prompt": "生成一个登录页面，包含用户名密码输入框、记住我选项和第三方登录",
-  "componentLib": "ElementUI",
-  "sessionId": "可选，如果是对话上下文则传入会话ID",
-  "files": "可选，之前的文件列表，用于二次修改"
+  "sessionId": "会话ID，可选",
+  "debug": false
 }
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | prompt | string | 是 | 用户需求描述 |
-| componentLib | string | 否 | 组件库，默认 ElementUI，可选 AUI |
-| sessionId | string | 否 | 会话ID，用于保持上下文和保存对话记录 |
-| files | array | 否 | 之前生成的文件列表，用于二次修改时传入 |
-
-**请求示例**
-
-**首次生成（无 files）**：
-```json
-{
-  "prompt": "生成一个登录页面",
-  "componentLib": "ElementUI",
-  "sessionId": "xxx-xxx-xxx"
-}
-```
-
-**二次修改（带 files）**：
-```json
-{
-  "prompt": "给登录页面添加一个注册按钮",
-  "componentLib": "ElementUI",
-  "sessionId": "xxx-xxx-xxx",
-  "files": [
-    {
-      "id": "main-page",
-      "name": "MainPage.vue",
-      "path": "/src/MainPage.vue",
-      "type": "file",
-      "language": "vue",
-      "content": "<template>...</template>"
-    },
-    {
-      "id": "hello-world",
-      "name": "HelloWorld.vue",
-      "path": "/src/HelloWorld.vue",
-      "type": "file",
-      "language": "vue",
-      "content": "<template>...</template>"
-    }
-  ]
-}
-```
+| sessionId | string | 否 | 会话ID，可选，为空时不保存到数据库 |
+| debug | boolean | 否 | 是否返回调试信息（各阶段耗时、中间输出），默认 false |
 
 **响应**
 
@@ -123,17 +82,94 @@ POST /api/generate
         "type": "file",
         "language": "vue",
         "content": "<template>...</template>"
+      }
+    ],
+    "message": "代码生成完成",
+    "stages": {
+      "requirement": {
+        "status": "success",
+        "duration": 1.23
       },
+      "generation": {
+        "status": "success",
+        "duration": 5.67
+      },
+      "optimization": {
+        "status": "skipped",
+        "duration": 0.01
+      }
+    }
+  }
+}
+```
+
+**stages 字段说明（仅 debug=true 时返回）**
+
+| 阶段 | 字段 | 说明 |
+|------|------|------|
+| requirement | status, duration, output, error | 步骤1：需求标准化 |
+| generation | status, duration, output, error | 步骤2：代码生成 |
+| optimization | status, duration, output, error | 步骤3：UX优化 |
+
+---
+
+### 1.2 迭代修改代码（多轮对话）
+
+基于现有代码进行修改，支持多轮对话迭代。
+
+**重要说明**：
+- 此接口用于**二次或多轮对话修改**，必须传入当前文件列表
+- 直接调用 AI 生成，不走三步骤流程
+- files 为必填参数
+
+**请求**
+
+```
+POST /api/generate/iterate
+```
+
+**请求体**
+
+```json
+{
+  "prompt": "给登录页面添加一个注册按钮",
+  "sessionId": "会话ID，可选",
+  "files": [
+    {
+      "id": "main-page",
+      "name": "MainPage.vue",
+      "path": "/src/MainPage.vue",
+      "type": "file",
+      "language": "vue",
+      "content": "<template>...</template>"
+    }
+  ]
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| prompt | string | 是 | 修改需求描述 |
+| sessionId | string | 否 | 会话ID，可选，为空时不保存到数据库 |
+| files | array | 是 | 当前文件列表，必填 |
+
+**响应**
+
+```json
+{
+  "code": 0,
+  "data": {
+    "files": [
       {
-        "id": "hello-world",
-        "name": "HelloWorld.vue",
-        "path": "/src/HelloWorld.vue",
+        "id": "main-page",
+        "name": "MainPage.vue",
+        "path": "/src/MainPage.vue",
         "type": "file",
         "language": "vue",
         "content": "<template>...</template>"
       }
     ],
-    "message": "我理解您的需求..."
+    "message": "已为您添加注册按钮"
   }
 }
 ```
@@ -152,32 +188,32 @@ POST /api/generate
 **前端使用示例**
 
 ```typescript
-import { generateCode } from '@/api'
+import { generateInitial, generateIterate } from '@/api'
 import { buildProjectFiles } from '@/templates/project-template'
 
 // 首次生成
 async function handleFirstGenerate(prompt: string, sessionId: string) {
-  const result = await generateCode({ prompt, componentLib: 'ElementUI', sessionId })
+  const result = await generateInitial({ 
+    prompt, 
+    sessionId,
+    debug: false 
+  })
   
-  // 构建完整项目
   const mainPageContent = result.files[0].content
   const extraFiles = result.files.slice(1)
   const projectFiles = buildProjectFiles(mainPageContent, extraFiles)
   
-  // 保存 files 用于下次修改
   return { projectFiles, generatedFiles: result.files }
 }
 
 // 二次修改
 async function handleModify(prompt: string, sessionId: string, previousFiles: File[]) {
-  const result = await generateCode({ 
+  const result = await generateIterate({ 
     prompt, 
-    componentLib: 'ElementUI', 
     sessionId,
-    files: previousFiles  // 传入之前的文件
+    files: previousFiles
   })
   
-  // 构建更新后的项目
   const mainPageContent = result.files[0].content
   const extraFiles = result.files.slice(1)
   const projectFiles = buildProjectFiles(mainPageContent, extraFiles)
@@ -506,7 +542,8 @@ Header: Authorization: Bearer <token>
 | 接口 | 说明 |
 |------|------|
 | `GET /health` | 健康检查 |
-| `POST /api/generate` | AI 代码生成（返回示例数据） |
+| `POST /api/generate/initial` | 初始生成代码（新会话，三步骤流程） |
+| `POST /api/generate/iterate` | 迭代修改代码（多轮对话） |
 | `POST /api/sessions` | 创建会话 |
 | `GET /api/sessions` | 获取会话列表 |
 | `GET /api/sessions/:sessionId` | 获取会话详情 |
@@ -521,6 +558,13 @@ Header: Authorization: Bearer <token>
 | `POST /api/auth/login` | 用户登录 |
 | `POST /api/auth/register` | 用户注册 |
 | `GET /api/auth/me` | 获取当前用户 |
+
+### 已废弃 ❌
+
+| 接口 | 说明 |
+|------|------|
+| `POST /api/generate` | 已拆分为 `/api/generate/initial` 和 `/api/generate/iterate` |
+| `POST /api/generate-v2` | 已重命名为 `/api/generate/initial` |
 
 ---
 
