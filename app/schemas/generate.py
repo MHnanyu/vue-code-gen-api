@@ -16,6 +16,7 @@ class GenerateInitialRequest(BaseModel):
     prompt: str
     sessionId: Optional[str] = None
     debug: bool = False
+    componentLib: str = "ElementUI"
 
 
 class GenerateIterateRequest(BaseModel):

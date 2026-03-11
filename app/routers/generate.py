@@ -16,6 +16,7 @@ from app.schemas.generate import (
 )
 from app.services.ai_factory import AIServiceFactory
 from app.services.requirement_service import RequirementService
+from app.services.openclaw_service import OpenclawService
 
 logger = logging.getLogger(__name__)
 
@@ -292,87 +293,108 @@ async def generate_initial(body: GenerateInitialRequest):
         requirement_service = RequirementService()
         
         logger.info("阶段1: 需求标准化开始")
-        stage1_result = await requirement_service.standardize_requirement(
-            user_requirement=body.prompt,
-            temperature=0.2
-        )
+#         stage1_result = await requirement_service.standardize_requirement(
+#             user_requirement=body.prompt,
+#             temperature=0.2
+#         )
+#
+#         stages["requirement"] = StageResult(
+#             status=stage1_result["status"],
+#             duration=stage1_result.get("duration"),
+#             output=stage1_result.get("output") if body.debug else None,
+#             error=stage1_result.get("error")
+#         )
+#
+#         if stage1_result.get("output"):
+#             save_stage_output(
+#                 stage_name="requirement",
+#                 step_number=1,
+#                 content=stage1_result["output"],
+#                 session_id=output_session_id,
+#                 file_extension="md"
+#             )
+#
+#         if stage1_result["status"] == "failed":
+#             logger.error(f"阶段1失败: {stage1_result.get('error')}")
+#             ai_message = f"需求标准化失败: {stage1_result.get('error')}"
+#
+#             files = [
+#                 GeneratedFile(
+#                     id="error-page",
+#                     name="MainPage.vue",
+#                     path="/src/MainPage.vue",
+#                     type="file",
+#                     language="vue",
+#                     content=f"""<template>
+#   <div class="p-6">
+#     <el-alert
+#       title="需求标准化失败"
+#       type="error"
+#       description="{ai_message}"
+#       show-icon
+#     />
+#     <p class="mt-4 text-gray-600">原始需求：{body.prompt}</p>
+#   </div>
+# </template>
+#
+# <script setup lang="ts">
+# import {{ ref }} from 'vue'
+# </script>"""
+#                 )
+#             ]
+#
+#             return Response(data=GenerateInitialResponseData(
+#                 files=files,
+#                 message=ai_message,
+#                 stages=stages
+#             ))
         
-        stages["requirement"] = StageResult(
-            status=stage1_result["status"],
-            duration=stage1_result.get("duration"),
-            output=stage1_result.get("output") if body.debug else None,
-            error=stage1_result.get("error")
-        )
-        
-        if stage1_result.get("output"):
-            save_stage_output(
-                stage_name="requirement",
-                step_number=1,
-                content=stage1_result["output"],
-                session_id=output_session_id,
-                file_extension="md"
-            )
-        
-        if stage1_result["status"] == "failed":
-            logger.error(f"阶段1失败: {stage1_result.get('error')}")
-            ai_message = f"需求标准化失败: {stage1_result.get('error')}"
-            
-            files = [
-                GeneratedFile(
-                    id="error-page",
-                    name="MainPage.vue",
-                    path="/src/MainPage.vue",
-                    type="file",
-                    language="vue",
-                    content=f"""<template>
-  <div class="p-6">
-    <el-alert
-      title="需求标准化失败"
-      type="error"
-      description="{ai_message}"
-      show-icon
-    />
-    <p class="mt-4 text-gray-600">原始需求：{body.prompt}</p>
-  </div>
-</template>
-
-<script setup lang="ts">
-import {{ ref }} from 'vue'
-</script>"""
-                )
-            ]
-            
-            return Response(data=GenerateInitialResponseData(
-                files=files,
-                message=ai_message,
-                stages=stages
-            ))
-        
-        requirement_doc = stage1_result["output"]
+        # requirement_doc = stage1_result["output"]
+        requirement_doc = body.prompt
         logger.info(f"阶段1完成 - 需求文档长度: {len(requirement_doc)}")
         
         stage2_start = time.time()
         
-        logger.info("阶段2: 基础代码生成（使用旧版生成器临时方案）")
-        ai_service = AIServiceFactory.get_service()
-        
-        logger.info("调用旧版生成器")
-        result = await ai_service.generate_vue_files(
-            prompt=requirement_doc,
-            existing_files=None
-        )
+        if body.componentLib.lower() == "ccui":
+            logger.info("阶段2: CcUI组件代码生成（使用 Openclaw API）")
+            openclaw_service = OpenclawService()
+            
+            ccui_prompt = """请调用 vue3-ccui-generator skill，基于以下UX规范文档，生成基于 Vue3 + CcUI 组件库的 MainPage.vue 及其他自定义组件。
+
+输出要求：按照 skill 的要求返回 JSON 格式的结果，且仅输出 JSON 即可。
+
+---
+UX规范文档：
+""" + requirement_doc
+            
+            logger.info("调用 Openclaw API")
+            logger.info(f"ccui_prompt: {ccui_prompt}")
+            result = await openclaw_service.generate_vue_files(
+                prompt=ccui_prompt,
+                ccui_prompt=""
+            )
+        else:
+            logger.info("阶段2: 基础代码生成（使用旧版生成器临时方案）")
+            ai_service = AIServiceFactory.get_service()
+            
+            logger.info("调用旧版生成器")
+            # result = await ai_service.generate_vue_files(
+            #     prompt=requirement_doc,
+            #     existing_files=None
+            # )
+            result = {}
         
         stage2_duration = time.time() - stage2_start
         
         api_files = result.get("files", [])
-        ai_message = result.get("message", "代码生成完成（使用旧版生成器）")
+        ai_message = result.get("message", f"代码生成完成（{body.componentLib}）")
         
         files = convert_api_files_to_generated(api_files)
         
         stages["generation"] = StageResult(
             status="success",
             duration=round(stage2_duration, 2),
-            output=f"生成了 {len(files)} 个文件" if body.debug else None,
+            output=f"生成了 {len(files)} 个文件 ({body.componentLib})" if body.debug else None,
             error=None
         )
         
