@@ -293,64 +293,63 @@ async def generate_initial(body: GenerateInitialRequest):
         requirement_service = RequirementService()
         
         logger.info("阶段1: 需求标准化开始")
-#         stage1_result = await requirement_service.standardize_requirement(
-#             user_requirement=body.prompt,
-#             temperature=0.2
-#         )
-#
-#         stages["requirement"] = StageResult(
-#             status=stage1_result["status"],
-#             duration=stage1_result.get("duration"),
-#             output=stage1_result.get("output") if body.debug else None,
-#             error=stage1_result.get("error")
-#         )
-#
-#         if stage1_result.get("output"):
-#             save_stage_output(
-#                 stage_name="requirement",
-#                 step_number=1,
-#                 content=stage1_result["output"],
-#                 session_id=output_session_id,
-#                 file_extension="md"
-#             )
-#
-#         if stage1_result["status"] == "failed":
-#             logger.error(f"阶段1失败: {stage1_result.get('error')}")
-#             ai_message = f"需求标准化失败: {stage1_result.get('error')}"
-#
-#             files = [
-#                 GeneratedFile(
-#                     id="error-page",
-#                     name="MainPage.vue",
-#                     path="/src/MainPage.vue",
-#                     type="file",
-#                     language="vue",
-#                     content=f"""<template>
-#   <div class="p-6">
-#     <el-alert
-#       title="需求标准化失败"
-#       type="error"
-#       description="{ai_message}"
-#       show-icon
-#     />
-#     <p class="mt-4 text-gray-600">原始需求：{body.prompt}</p>
-#   </div>
-# </template>
-#
-# <script setup lang="ts">
-# import {{ ref }} from 'vue'
-# </script>"""
-#                 )
-#             ]
-#
-#             return Response(data=GenerateInitialResponseData(
-#                 files=files,
-#                 message=ai_message,
-#                 stages=stages
-#             ))
+        stage1_result = await requirement_service.standardize_requirement(
+            user_requirement=body.prompt,
+            temperature=0.2
+        )
+
+        stages["requirement"] = StageResult(
+            status=stage1_result["status"],
+            duration=stage1_result.get("duration"),
+            output=stage1_result.get("output") if body.debug else None,
+            error=stage1_result.get("error")
+        )
+
+        if stage1_result.get("output"):
+            save_stage_output(
+                stage_name="requirement",
+                step_number=1,
+                content=stage1_result["output"],
+                session_id=output_session_id,
+                file_extension="md"
+            )
+
+        if stage1_result["status"] == "failed":
+            logger.error(f"阶段1失败: {stage1_result.get('error')}")
+            ai_message = f"需求标准化失败: {stage1_result.get('error')}"
+
+            files = [
+                GeneratedFile(
+                    id="error-page",
+                    name="MainPage.vue",
+                    path="/src/MainPage.vue",
+                    type="file",
+                    language="vue",
+                    content=f"""<template>
+  <div class="p-6">
+    <el-alert
+      title="需求标准化失败"
+      type="error"
+      description="{ai_message}"
+      show-icon
+    />
+    <p class="mt-4 text-gray-600">原始需求：{body.prompt}</p>
+  </div>
+</template>
+
+<script setup lang="ts">
+import {{ ref }} from 'vue'
+</script>"""
+                )
+            ]
+
+            return Response(data=GenerateInitialResponseData(
+                files=files,
+                message=ai_message,
+                stages=stages
+            ))
         
-        # requirement_doc = stage1_result["output"]
-        requirement_doc = body.prompt
+        requirement_doc = stage1_result["output"]
         logger.info(f"阶段1完成 - 需求文档长度: {len(requirement_doc)}")
         
         stage2_start = time.time()
@@ -421,34 +420,57 @@ UX规范文档：
             logger.info(f"成功生成 {len(files)} 个文件 - message: {ai_message}")
         
         stage3_start = time.time()
-        logger.info("阶段3: UX规范优化（跳过，直接使用旧版生成结果）")
+        logger.info("阶段3: UX规范优化（使用 Openclaw API）")
         
-        final_files_data = {
-            "files": [f.model_dump() for f in files],
-            "message": ai_message,
-            "note": "当前阶段3尚未实现，直接使用旧版生成结果"
-        }
+        openclaw_service = OpenclawService()
+        
+        optimization_prompt = """请调用 ccui-ux-guardian skill，基于原始的 Vue 组件，生成符合企业 UI/UX 标准的 Vue 组件。
+
+输出要求：按照 skill 的要求返回 JSON 格式的结果，且仅输出 JSON 即可。"""
+        
+        stage2_files_json = json.dumps([f.model_dump() for f in files], ensure_ascii=False, indent=2)
+        
+        full_prompt = f"""{optimization_prompt}
+
+待优化的文件：
+{stage2_files_json}
+"""
+        
+        logger.info("调用 Openclaw API 进行优化")
+        stage3_result = await openclaw_service.generate_vue_files(
+            prompt=full_prompt,
+            ccui_prompt=""
+        )
+        
+        stage3_api_files = stage3_result.get("files", [])
+        stage3_message = stage3_result.get("message", "优化完成")
+        
+        optimized_files = convert_api_files_to_generated(stage3_api_files)
+        
+        if optimized_files:
+            files = optimized_files
+            ai_message = stage3_message
         
         stage3_duration = time.time() - stage3_start
         
         stages["optimization"] = StageResult(
-            status="skipped",
+            status="success",
             duration=round(stage3_duration, 2),
-            output="阶段3尚未实现，已跳过" if body.debug else None,
+            output=f"优化生成了 {len(files)} 个文件" if body.debug else None,
             error=None
         )
         
         save_stage_output(
             stage_name="optimization",
             step_number=3,
-            content=final_files_data,
+            content=stage3_result,
             session_id=output_session_id,
             file_extension="json"
         )
         
-        if files:
+        if stage3_api_files:
             save_vue_files_from_json(
-                files_data=[f.model_dump() for f in files],
+                files_data=stage3_api_files,
                 session_id=output_session_id,
                 step_number=3,
                 stage_name="optimization"

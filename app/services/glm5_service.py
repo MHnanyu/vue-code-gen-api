@@ -37,7 +37,7 @@ class GLM5Service(AIService):
         if response_format:
             payload["response_format"] = response_format
         
-        async with httpx.AsyncClient(timeout=600.0) as client:
+        async with httpx.AsyncClient(timeout=3000.0) as client:
             if stream:
                 async with client.stream(
                     "POST",
