@@ -8,13 +8,18 @@ class Settings(BaseSettings):
     
     AI_PROVIDER: str = "glm5"
     
-    GLM5_API_KEY: Optional[str] = None
+    GLM5_API_KEY: Optional[str] = ""
     GLM5_API_URL: str = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
     GLM5_MODEL: str = "glm-5"
     
     MINIMAX_API_KEY: Optional[str] = None
     MINIMAX_API_URL: str = ""
     MINIMAX_MODEL: str = ""
+    
+    OPENCLAW_API_URL: str = "http://127.0.0.1:18789/v1/responses"
+    OPENCLAW_TOKEN: Optional[str] = ""
+    OPENCLAW_AGENT_ID: str = "main"
+    OPENCLAW_MODEL: str = "openclaw"
     
     class Config:
         env_file = ".env"

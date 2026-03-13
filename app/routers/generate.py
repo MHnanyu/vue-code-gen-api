@@ -373,15 +373,14 @@ UX规范文档：
                 ccui_prompt=""
             )
         else:
-            logger.info("阶段2: 基础代码生成（使用旧版生成器临时方案）")
+            logger.info("阶段2: ElementUI代码生成（使用 GLM5）")
             ai_service = AIServiceFactory.get_service()
             
-            logger.info("调用旧版生成器")
-            # result = await ai_service.generate_vue_files(
-            #     prompt=requirement_doc,
-            #     existing_files=None
-            # )
-            result = {}
+            logger.info("调用 GLM5 生成 ElementUI 代码")
+            result = await ai_service.generate_vue_files(
+                prompt=requirement_doc,
+                existing_files=None
+            )
         
         stage2_duration = time.time() - stage2_start
         
@@ -419,62 +418,63 @@ UX规范文档：
         else:
             logger.info(f"成功生成 {len(files)} 个文件 - message: {ai_message}")
         
-        stage3_start = time.time()
-        logger.info("阶段3: UX规范优化（使用 Openclaw API）")
-        
-        openclaw_service = OpenclawService()
-        
-        optimization_prompt = """请调用 ccui-ux-guardian skill，基于原始的 Vue 组件，生成符合企业 UI/UX 标准的 Vue 组件。
+        if body.componentLib.lower() == "ccui":
+            stage3_start = time.time()
+            logger.info("阶段3: UX规范优化（使用 Openclaw API）")
+            
+            openclaw_service = OpenclawService()
+            
+            optimization_prompt = """请调用 ccui-ux-guardian skill，基于原始的 Vue 组件，生成符合企业 UI/UX 标准的 Vue 组件。
 
 输出要求：按照 skill 的要求返回 JSON 格式的结果，且仅输出 JSON 即可。"""
-        
-        stage2_files_json = json.dumps([f.model_dump() for f in files], ensure_ascii=False, indent=2)
-        
-        full_prompt = f"""{optimization_prompt}
+            
+            stage2_files_json = json.dumps([f.model_dump() for f in files], ensure_ascii=False, indent=2)
+            
+            full_prompt = f"""{optimization_prompt}
 
 待优化的文件：
 {stage2_files_json}
 """
-        
-        logger.info("调用 Openclaw API 进行优化")
-        stage3_result = await openclaw_service.generate_vue_files(
-            prompt=full_prompt,
-            ccui_prompt=""
-        )
-        
-        stage3_api_files = stage3_result.get("files", [])
-        stage3_message = stage3_result.get("message", "优化完成")
-        
-        optimized_files = convert_api_files_to_generated(stage3_api_files)
-        
-        if optimized_files:
-            files = optimized_files
-            ai_message = stage3_message
-        
-        stage3_duration = time.time() - stage3_start
-        
-        stages["optimization"] = StageResult(
-            status="success",
-            duration=round(stage3_duration, 2),
-            output=f"优化生成了 {len(files)} 个文件" if body.debug else None,
-            error=None
-        )
-        
-        save_stage_output(
-            stage_name="optimization",
-            step_number=3,
-            content=stage3_result,
-            session_id=output_session_id,
-            file_extension="json"
-        )
-        
-        if stage3_api_files:
-            save_vue_files_from_json(
-                files_data=stage3_api_files,
-                session_id=output_session_id,
-                step_number=3,
-                stage_name="optimization"
+            
+            logger.info("调用 Openclaw API 进行优化")
+            stage3_result = await openclaw_service.generate_vue_files(
+                prompt=full_prompt,
+                ccui_prompt=""
             )
+            
+            stage3_api_files = stage3_result.get("files", [])
+            stage3_message = stage3_result.get("message", "优化完成")
+            
+            optimized_files = convert_api_files_to_generated(stage3_api_files)
+            
+            if optimized_files:
+                files = optimized_files
+                ai_message = stage3_message
+            
+            stage3_duration = time.time() - stage3_start
+            
+            stages["optimization"] = StageResult(
+                status="success",
+                duration=round(stage3_duration, 2),
+                output=f"优化生成了 {len(files)} 个文件" if body.debug else None,
+                error=None
+            )
+            
+            save_stage_output(
+                stage_name="optimization",
+                step_number=3,
+                content=stage3_result,
+                session_id=output_session_id,
+                file_extension="json"
+            )
+            
+            if stage3_api_files:
+                save_vue_files_from_json(
+                    files_data=stage3_api_files,
+                    session_id=output_session_id,
+                    step_number=3,
+                    stage_name="optimization"
+                )
             
     except ValueError as e:
         logger.error(f"AI服务配置错误: {str(e)}")

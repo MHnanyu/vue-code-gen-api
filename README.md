@@ -31,7 +31,7 @@ Vue3 Page Generator 后端 API 服务，基于 FastAPI + MongoDB 实现。
 ### 核心流程
 
 1. 用户在前端输入需求描述（如"生成一个登录页面"）
-2. 前端调用 `/api/generate` 接口
+2. 前端调用 `/api/generate/initial` 接口（首次生成）或 `/api/generate/iterate` 接口（迭代修改）
 3. 后端生成 Vue3 项目代码（MainPage.vue、HelloWorld.vue 等）
 4. 前端使用 `buildProjectFiles()` 组合完整项目结构
 5. 用户可在前端预览、编辑生成的代码
@@ -115,7 +115,9 @@ DATABASE_NAME=vue_code_gen
 | id | string | 是 | 会话唯一标识 (UUID) |
 | userId | string | 否 | 用户ID（P3 阶段使用，当前可为 null） |
 | title | string | 否 | 会话标题 |
+| componentLib | string | 否 | 选择的组件库，可选值：ElementUI、aui、ccui |
 | messages | array | 否 | 消息列表（嵌入式文档） |
+| files | array | 否 | 生成的文件列表 |
 | createdAt | datetime | 是 | 创建时间 |
 | updatedAt | datetime | 是 | 更新时间 |
 
@@ -223,13 +225,15 @@ vue-code-gen-api/
 | GET | /api/sessions/{sessionId} | 获取会话详情 |
 | DELETE | /api/sessions/{sessionId} | 删除会话 |
 | PATCH | /api/sessions/{sessionId} | 更新会话标题 |
+| PATCH | /api/sessions/{sessionId}/files | 更新会话文件 |
 | POST | /api/sessions/{sessionId}/messages | 添加消息 |
 
 ### 代码生成
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | /api/generate | AI 代码生成 |
+| POST | /api/generate/initial | 初始生成代码（新会话） |
+| POST | /api/generate/iterate | 迭代修改代码（多轮对话） |
 
 详细接口说明请参考 [API.md](./API.md)
 

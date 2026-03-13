@@ -76,7 +76,43 @@ class GLM5Service(AIService):
         prompt: str,
         existing_files: Optional[list[dict]] = None
     ) -> dict:
-        system_message = """你是一个Vue3前端开发助手。根据用户需求生成Vue3组件代码。
+        if existing_files:
+            system_message = """你是一个Vue3前端代码优化助手。根据用户的修改需求，对现有的Vue组件代码进行优化。
+
+重要规则：
+1. 输入N个Vue文件，必须输出N个Vue文件，保持一对一映射
+2. 每个输出文件的id、name、path必须与对应的输入文件完全一致
+3. 只修改content内容，根据用户的修改需求优化代码
+4. 即使某个文件不需要修改，也必须在输出中包含该文件（保持原样）
+
+技术栈：
+- Vue 3 Composition API (<script setup lang="ts">)
+- TypeScript
+- Element Plus (el-开头组件)
+- Tailwind CSS (class样式)
+
+返回JSON格式：
+{
+  "files": [
+    {
+      "id": "与输入文件的id一致",
+      "name": "与输入文件的name一致",
+      "path": "与输入文件的path一致",
+      "type": "file",
+      "language": "vue",
+      "content": "优化后的完整代码"
+    }
+  ],
+  "message": "修改说明"
+}"""
+            
+            files_context = "\n\n".join([
+                f"--- 文件: {f.get('name', 'unknown')} (id: {f.get('id', 'unknown')}) ---\n{f.get('content', '')}"
+                for f in existing_files
+            ])
+            user_message = f"现有代码文件：\n{files_context}\n\n修改需求：{prompt}"
+        else:
+            system_message = """你是一个Vue3前端开发助手。根据用户需求生成Vue3组件代码。
 
 生成规则：
 1. 只生成必要的Vue组件文件（MainPage.vue及其他自定义组件）
@@ -102,14 +138,7 @@ class GLM5Service(AIService):
   ],
   "message": "生成说明"
 }"""
-
-        user_message = prompt
-        if existing_files:
-            files_context = "\n\n".join([
-                f"文件: {f.get('name', 'unknown')}\n{f.get('content', '')}"
-                for f in existing_files[:2]
-            ])
-            user_message = f"已有代码：\n{files_context}\n\n修改需求：{prompt}"
+            user_message = prompt
         
         messages = [
             {"role": "system", "content": system_message},

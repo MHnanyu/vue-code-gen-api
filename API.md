@@ -43,7 +43,9 @@ GET /health
 
 **重要说明**：
 - 此接口用于**新会话首次生成**，不传已有文件
-- 走三步骤流程：步骤1 需求标准化 → 步骤2 代码生成 → 步骤3 UX优化
+- 走三步骤流程：步骤1 需求标准化 → 步骤2 代码生成 → 步骤3 UX优化（仅 CcUI）
+  - ElementUI/aui：走步骤1 需求标准化 → 步骤2 代码生成
+  - CcUI：走步骤1 需求标准化 → 步骤2 代码生成 → 步骤3 UX优化
 - 后续迭代修改请使用 `/api/generate/iterate` 接口
 
 **请求**
@@ -58,6 +60,7 @@ POST /api/generate/initial
 {
   "prompt": "生成一个登录页面，包含用户名密码输入框、记住我选项和第三方登录",
   "sessionId": "会话ID，可选",
+  "componentLib": "ElementUI",
   "debug": false
 }
 ```
@@ -66,6 +69,7 @@ POST /api/generate/initial
 |------|------|------|------|
 | prompt | string | 是 | 用户需求描述 |
 | sessionId | string | 否 | 会话ID，可选，为空时不保存到数据库 |
+| componentLib | string | 否 | 组件库选择，可选值：`ElementUI`、`aui`、`ccui`，默认 `ElementUI` |
 | debug | boolean | 否 | 是否返回调试信息（各阶段耗时、中间输出），默认 false |
 
 **响应**
@@ -400,6 +404,62 @@ PATCH /api/sessions/:sessionId
 }
 ```
 
+### 2.6 更新会话文件
+
+**请求**
+
+```
+PATCH /api/sessions/:sessionId/files
+```
+
+**路径参数**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| sessionId | string | 会话ID |
+
+**请求体**
+
+```json
+{
+  "files": [
+    {
+      "id": "main-page",
+      "name": "MainPage.vue",
+      "path": "/src/MainPage.vue",
+      "type": "file",
+      "language": "vue",
+      "content": "<template>...</template>"
+    }
+  ]
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| files | array | 是 | 文件列表 |
+
+**文件结构说明**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | string | 文件唯一标识 |
+| name | string | 文件名 |
+| path | string | 文件路径 |
+| type | string | 类型：file（始终为 file） |
+| language | string | 语言：vue（始终为 vue） |
+| content | string | 文件内容 |
+
+**响应**
+
+```json
+{
+  "code": 0,
+  "data": null,
+  "message": "更新成功"
+}
+```
+
 ---
 
 ## 3. 消息管理
@@ -553,6 +613,7 @@ Header: Authorization: Bearer <token>
 | `GET /api/sessions/:sessionId` | 获取会话详情 |
 | `DELETE /api/sessions/:sessionId` | 删除会话 |
 | `PATCH /api/sessions/:sessionId` | 更新会话标题 |
+| `PATCH /api/sessions/:sessionId/files` | 更新会话文件 |
 | `POST /api/sessions/:sessionId/messages` | 添加消息 |
 
 ### 待实现 🚧
@@ -581,7 +642,9 @@ Header: Authorization: Bearer <token>
 | id | string | 会话唯一标识 (UUID) |
 | userId | string | 用户ID（当前为 null） |
 | title | string | 会话标题 |
+| componentLib | string | 选择的组件库，可选值：`ElementUI`、`aui`、`ccui` |
 | messages | Message[] | 消息列表 |
+| files | File[] | 生成的文件列表 |
 | createdAt | datetime | 创建时间 |
 | updatedAt | datetime | 更新时间 |
 
