@@ -7,17 +7,20 @@ from datetime import datetime
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from typing import Optional
 
 from app.database import get_database
 from app.schemas.response import Response, ErrorCode
 from app.schemas.generate import (
     GenerateInitialRequest, GenerateIterateRequest, 
     GenerateResponseData, GenerateInitialResponseData,
-    GeneratedFile, StageResult, Attachment, UploadResponseData
+    GeneratedFile, StageResult, Attachment, UploadResponseData,
+    ImageAnalyzeRequest, ImageAnalyzeResponseData
 )
 from app.services.ai_factory import AIServiceFactory
 from app.services.requirement_service import RequirementService
 from app.services.openclaw_service import OpenclawService
+from app.services.glm4v_service import GLM4VService
 from app.config import settings
 from app.mock.generate_mock import (
     MOCK_ITERATE_FILES, MOCK_ITERATE_MESSAGE,
@@ -341,6 +344,7 @@ async def generate_iterate(body: GenerateIterateRequest):
 @router.post("/generate/initial")
 async def generate_initial(body: GenerateInitialRequest):
     logger.info(f"收到初始生成请求 - sessionId: {body.sessionId}, prompt长度: {len(body.prompt)}, debug: {body.debug}")
+    logger.info(f"附件数量: {len(body.attachments) if body.attachments else 0}")
     
     if settings.MOCK_MODE:
         logger.info("Mock 模式已开启，返回 mock 数据")
@@ -368,11 +372,80 @@ async def generate_initial(body: GenerateInitialRequest):
     ai_message = "生成完成"
     
     try:
+        final_prompt = body.prompt
+        
+        image_attachments = []
+        if body.attachments:
+            image_attachments = [a for a in body.attachments if a.type == "image"]
+        
+        if image_attachments:
+            logger.info(f"检测到 {len(image_attachments)} 个图片附件，开始分析图片...")
+            
+            glm4v_service = GLM4VService()
+            image_descriptions = []
+            
+            for idx, attachment in enumerate(image_attachments):
+                logger.info(f"分析图片 {idx + 1}/{len(image_attachments)}: {attachment.name}")
+                
+                image_url = attachment.url
+                is_base64 = False
+                
+                if image_url.startswith("/uploads/"):
+                    local_path = image_url[1:]
+                    if os.path.exists(local_path):
+                        with open(local_path, "rb") as f:
+                            image_url = GLM4VService.bytes_to_base64(f.read())
+                            is_base64 = True
+                        logger.info(f"图片已转换为Base64: {attachment.name}")
+                
+                try:
+                    image_result = await glm4v_service.describe_for_vue_generation(
+                        image_source=image_url,
+                        is_base64=is_base64
+                    )
+                    
+                    if image_result.get("success"):
+                        desc = image_result["raw_description"]
+                        image_descriptions.append(desc)
+                        logger.info(f"图片 {attachment.name} 分析完成，描述长度: {len(desc)}")
+                    else:
+                        logger.warning(f"图片 {attachment.name} 分析失败")
+                except Exception as img_err:
+                    logger.error(f"图片 {attachment.name} 分析异常: {str(img_err)}")
+            
+            if image_descriptions:
+                combined_image_desc = "\n\n".join([
+                    f"=== 图片 {i+1} 分析结果 ===\n{desc}"
+                    for i, desc in enumerate(image_descriptions)
+                ])
+                
+                if body.prompt:
+                    final_prompt = f"""用户需求：
+{body.prompt}
+
+图片分析结果：
+{combined_image_desc}"""
+                else:
+                    final_prompt = f"""图片分析结果：
+{combined_image_desc}"""
+                
+                logger.info(f"已将图片分析结果与用户需求拼接，最终prompt长度: {len(final_prompt)}")
+                logger.info(f"最终prompt前500字符:\n{final_prompt[:500]}...")
+                
+                save_stage_output(
+                    stage_name="image_analysis",
+                    step_number=0,
+                    content=final_prompt,
+                    session_id=output_session_id,
+                    file_extension="md"
+                )
+                logger.info("图片分析结果已保存到 output/ 目录")
+        
         requirement_service = RequirementService()
         
         logger.info("阶段1: 需求标准化开始")
         stage1_result = await requirement_service.standardize_requirement(
-            user_requirement=body.prompt,
+            user_requirement=final_prompt,
             temperature=0.2
         )
 
@@ -637,3 +710,115 @@ import {{ ref }} from 'vue'
         message=ai_message,
         stages=stages if body.debug else None
     ))
+
+
+@router.post("/image/analyze")
+async def analyze_image(body: ImageAnalyzeRequest):
+    logger.info("收到图片分析请求")
+    
+    if not body.imageUrl and not body.imageBase64:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": ErrorCode.PARAM_ERROR, "message": "请提供imageUrl或imageBase64", "data": None}
+        )
+    
+    try:
+        glm4v_service = GLM4VService()
+        
+        image_source = body.imageBase64 if body.imageBase64 else body.imageUrl
+        is_base64 = body.imageBase64 is not None
+        
+        if not image_source:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": ErrorCode.PARAM_ERROR, "message": "图片源无效", "data": None}
+            )
+        
+        if body.prompt:
+            result = await glm4v_service.analyze_image(
+                image_source=image_source,
+                prompt=body.prompt,
+                is_base64=is_base64
+            )
+            return Response(data=ImageAnalyzeResponseData(
+                description=result,
+                rawDescription=result,
+                success=True
+            ))
+        else:
+            result = await glm4v_service.describe_for_vue_generation(
+                image_source=image_source,
+                is_base64=is_base64
+            )
+            
+            return Response(data=ImageAnalyzeResponseData(
+                description=result["raw_description"],
+                rawDescription=result["raw_description"],
+                success=result["success"]
+            ))
+    
+    except Exception as e:
+        import traceback
+        logger.error(f"图片分析失败: {str(e)}\n{traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail={"code": ErrorCode.INTERNAL_ERROR, "message": f"图片分析失败: {str(e)}", "data": None}
+        )
+
+
+@router.post("/image/analyze-file")
+async def analyze_image_file(
+    file: UploadFile = File(...),
+    prompt: Optional[str] = Form(None)
+):
+    logger.info(f"收到图片文件分析请求 - filename: {file.filename}")
+    
+    if not file.filename:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": ErrorCode.PARAM_ERROR, "message": "请上传图片文件", "data": None}
+        )
+    
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in IMAGE_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": ErrorCode.PARAM_ERROR, "message": f"不支持的文件类型: {ext}", "data": None}
+        )
+    
+    try:
+        content = await file.read()
+        image_base64 = GLM4VService.bytes_to_base64(content)
+        
+        glm4v_service = GLM4VService()
+        
+        if prompt:
+            result = await glm4v_service.analyze_image(
+                image_source=image_base64,
+                prompt=prompt,
+                is_base64=True
+            )
+            return Response(data=ImageAnalyzeResponseData(
+                description=result,
+                rawDescription=result,
+                success=True
+            ))
+        else:
+            result = await glm4v_service.describe_for_vue_generation(
+                image_source=image_base64,
+                is_base64=True
+            )
+            
+            return Response(data=ImageAnalyzeResponseData(
+                description=result["raw_description"],
+                rawDescription=result["raw_description"],
+                success=result["success"]
+            ))
+    
+    except Exception as e:
+        import traceback
+        logger.error(f"图片文件分析失败: {str(e)}\n{traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail={"code": ErrorCode.INTERNAL_ERROR, "message": f"图片文件分析失败: {str(e)}", "data": None}
+        )

@@ -54,3 +54,15 @@ class GenerateInitialResponseData(BaseModel):
     files: List[GeneratedFile]
     message: str
     stages: Optional[Dict[str, StageResult]] = None
+
+
+class ImageAnalyzeRequest(BaseModel):
+    imageUrl: Optional[str] = None
+    imageBase64: Optional[str] = None
+    prompt: Optional[str] = None
+
+
+class ImageAnalyzeResponseData(BaseModel):
+    description: str
+    rawDescription: str
+    success: bool
