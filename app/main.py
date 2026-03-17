@@ -3,14 +3,19 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.database import connect_to_mongo, close_mongo_connection
 from app.routers import sessions, generate
+import os
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 @asynccontextmanager
@@ -37,6 +42,8 @@ app.add_middleware(
 
 app.include_router(sessions.router)
 app.include_router(generate.router)
+
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 
 @app.get("/")

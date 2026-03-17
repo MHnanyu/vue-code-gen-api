@@ -2,25 +2,88 @@ import logging
 import os
 import json
 import time
+import uuid
 from datetime import datetime
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 
 from app.database import get_database
 from app.schemas.response import Response, ErrorCode
 from app.schemas.generate import (
     GenerateInitialRequest, GenerateIterateRequest, 
     GenerateResponseData, GenerateInitialResponseData,
-    GeneratedFile, StageResult
+    GeneratedFile, StageResult, Attachment, UploadResponseData
 )
 from app.services.ai_factory import AIServiceFactory
 from app.services.requirement_service import RequirementService
 from app.services.openclaw_service import OpenclawService
+from app.config import settings
+from app.mock.generate_mock import (
+    MOCK_ITERATE_FILES, MOCK_ITERATE_MESSAGE,
+    MOCK_INITIAL_FILES, MOCK_INITIAL_MESSAGE, MOCK_STAGES
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["generate"])
+
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+MARKDOWN_EXTENSIONS = {".md", ".markdown"}
+TEXT_EXTENSIONS = {".txt"}
+
+
+def get_file_type(filename: str) -> str:
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in IMAGE_EXTENSIONS:
+        return "image"
+    elif ext in MARKDOWN_EXTENSIONS:
+        return "markdown"
+    elif ext in TEXT_EXTENSIONS:
+        return "text"
+    return "text"
+
+
+@router.post("/upload")
+async def upload_files(files: list[UploadFile] = File(...)):
+    logger.info(f"收到文件上传请求 - 文件数: {len(files)}")
+    
+    if len(files) > 5:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": ErrorCode.PARAM_ERROR, "message": "最多支持上传5个文件", "data": None}
+        )
+    
+    uploaded_files = []
+    
+    for file in files:
+        file_id = str(uuid.uuid4())
+        ext = os.path.splitext(file.filename)[1].lower() if file.filename else ""
+        saved_filename = f"{file_id}{ext}"
+        file_path = os.path.join(UPLOAD_DIR, saved_filename)
+        
+        content = await file.read()
+        file_size = len(content)
+        
+        with open(file_path, "wb") as f:
+            f.write(content)
+        
+        file_type = get_file_type(file.filename or "")
+        
+        attachment = Attachment(
+            id=file_id,
+            url=f"/uploads/{saved_filename}",
+            name=file.filename or "unknown",
+            type=file_type,
+            size=file_size
+        )
+        uploaded_files.append(attachment)
+        logger.info(f"文件上传成功 - id: {file_id}, name: {file.filename}, type: {file_type}, size: {file_size}")
+    
+    return Response(data=UploadResponseData(files=uploaded_files))
 
 
 def save_stage_output(
@@ -125,6 +188,13 @@ def convert_api_files_to_generated(api_files: list[dict]) -> list[GeneratedFile]
 @router.post("/generate/iterate")
 async def generate_iterate(body: GenerateIterateRequest):
     logger.info(f"收到迭代生成请求 - sessionId: {body.sessionId}, prompt长度: {len(body.prompt)}, 文件数: {len(body.files)}")
+    
+    if settings.MOCK_MODE:
+        logger.info("Mock 模式已开启，返回 mock 数据")
+        return Response(data=GenerateResponseData(
+            files=MOCK_ITERATE_FILES,
+            message=MOCK_ITERATE_MESSAGE
+        ))
     
     output_session_id = body.sessionId if body.sessionId else f"no_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
@@ -271,6 +341,14 @@ async def generate_iterate(body: GenerateIterateRequest):
 @router.post("/generate/initial")
 async def generate_initial(body: GenerateInitialRequest):
     logger.info(f"收到初始生成请求 - sessionId: {body.sessionId}, prompt长度: {len(body.prompt)}, debug: {body.debug}")
+    
+    if settings.MOCK_MODE:
+        logger.info("Mock 模式已开启，返回 mock 数据")
+        return Response(data=GenerateInitialResponseData(
+            files=MOCK_INITIAL_FILES,
+            message=MOCK_INITIAL_MESSAGE,
+            stages=MOCK_STAGES if body.debug else None
+        ))
     
     output_session_id = body.sessionId if body.sessionId else f"no_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     

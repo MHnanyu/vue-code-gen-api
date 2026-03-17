@@ -1,5 +1,17 @@
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from pydantic import BaseModel, Field
+
+
+class Attachment(BaseModel):
+    id: str
+    url: str
+    name: str
+    type: Literal["image", "text", "markdown"]
+    size: Optional[int] = None
+
+
+class UploadResponseData(BaseModel):
+    files: List[Attachment]
 
 
 class GeneratedFile(BaseModel):
@@ -17,6 +29,7 @@ class GenerateInitialRequest(BaseModel):
     sessionId: Optional[str] = None
     debug: bool = False
     componentLib: str = "ElementUI"
+    attachments: Optional[List[Attachment]] = None
 
 
 class GenerateIterateRequest(BaseModel):
