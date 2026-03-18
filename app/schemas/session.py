@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Optional, List, Literal
 from pydantic import BaseModel, Field
 from app.schemas.message import CodeFile
+from app.schemas.generate import Attachment
 
 
 ComponentLib = Literal['ElementUI', 'aui', 'ccui']
@@ -11,6 +12,7 @@ class Message(BaseModel):
     id: str = Field(default_factory=lambda: str(__import__("uuid").uuid4()))
     role: str
     content: str
+    attachments: Optional[List[Attachment]] = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -29,7 +31,7 @@ class Session(BaseModel):
     title: Optional[str] = None
     componentLib: Optional[ComponentLib] = None
     messages: List[Message] = []
-    files: Optional[List[CodeFile]] = None
+    files: Optional[List[CodeFile]] = Field(default_factory=list)
     createdAt: datetime = Field(default_factory=datetime.utcnow)
     updatedAt: datetime = Field(default_factory=datetime.utcnow)
 

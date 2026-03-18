@@ -1,11 +1,13 @@
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel
+from app.schemas.generate import Attachment
 
 
 class MessageCreate(BaseModel):
     role: str
     content: str
+    attachments: Optional[List[Attachment]] = None
 
 
 class CodeFile(BaseModel):

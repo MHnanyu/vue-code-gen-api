@@ -94,6 +94,7 @@ async def add_message(sessionId: str, body: MessageCreate):
         id=str(uuid4()),
         role=body.role,
         content=body.content,
+        attachments=body.attachments,
         timestamp=now
     )
     

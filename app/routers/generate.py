@@ -188,23 +188,52 @@ def convert_api_files_to_generated(api_files: list[dict]) -> list[GeneratedFile]
     ]
 
 
+async def update_session_files_only(
+    db,
+    session_id: str | None,
+    files: list[GeneratedFile]
+):
+    if session_id is None or db is None:
+        return
+    
+    now = datetime.utcnow()
+    
+    update_result = await db.sessions.update_one(
+        {"id": session_id},
+        {
+            "$set": {
+                "updatedAt": now,
+                "files": [f.model_dump() for f in files]
+            }
+        }
+    )
+    
+    if update_result.matched_count == 0:
+        logger.error(f"会话不存在 - sessionId: {session_id}")
+        raise HTTPException(
+            status_code=404,
+            detail={"code": ErrorCode.SESSION_NOT_FOUND, "message": "会话不存在", "data": None}
+        )
+    
+    logger.info(f"会话文件更新成功 - sessionId: {session_id}")
+
+
 @router.post("/generate/iterate")
 async def generate_iterate(body: GenerateIterateRequest):
     logger.info(f"收到迭代生成请求 - sessionId: {body.sessionId}, prompt长度: {len(body.prompt)}, 文件数: {len(body.files)}")
     
-    if settings.MOCK_MODE:
-        logger.info("Mock 模式已开启，返回 mock 数据")
-        return Response(data=GenerateResponseData(
-            files=MOCK_ITERATE_FILES,
-            message=MOCK_ITERATE_MESSAGE
-        ))
+    db = get_database() if body.sessionId else None
+    
+    # if settings.MOCK_MODE:
+    #     logger.info("Mock 模式已开启，返回 mock 数据")
+    #     files = MOCK_ITERATE_FILES
+    #     ai_message = MOCK_ITERATE_MESSAGE
+    #     await update_session_files_only(db, body.sessionId, files)
+    #     return Response(data=GenerateResponseData(files=files, message=ai_message))
     
     output_session_id = body.sessionId if body.sessionId else f"no_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
-    db = None
     if body.sessionId is not None:
-        db = get_database()
-        
         if db is None:
             logger.error("数据库未连接")
             raise HTTPException(
@@ -297,46 +326,7 @@ async def generate_iterate(body: GenerateIterateRequest):
                 stage_name=f"iterate_{timestamp}"
             )
     
-    if body.sessionId is not None and db is not None:
-        now = datetime.utcnow()
-        
-        user_msg = {
-            "id": str(uuid4()),
-            "role": "user",
-            "content": body.prompt,
-            "timestamp": now
-        }
-        
-        assistant_msg = {
-            "id": str(uuid4()),
-            "role": "assistant",
-            "content": ai_message,
-            "timestamp": now
-        }
-        
-        update_data = {
-            "$push": {
-                "messages": {"$each": [user_msg, assistant_msg]}
-            },
-            "$set": {
-                "updatedAt": now,
-                "files": [f.model_dump() for f in files]
-            }
-        }
-        
-        update_result = await db.sessions.update_one(
-            {"id": body.sessionId},
-            update_data
-        )
-        
-        if update_result.matched_count == 0:
-            logger.error(f"会话不存在 - sessionId: {body.sessionId}")
-            raise HTTPException(
-                status_code=404,
-                detail={"code": ErrorCode.SESSION_NOT_FOUND, "message": "会话不存在", "data": None}
-            )
-        
-        logger.info(f"会话更新成功 - sessionId: {body.sessionId}")
+    await update_session_files_only(db, body.sessionId, files)
     
     return Response(data=GenerateResponseData(files=files, message=ai_message))
 
@@ -346,20 +336,22 @@ async def generate_initial(body: GenerateInitialRequest):
     logger.info(f"收到初始生成请求 - sessionId: {body.sessionId}, prompt长度: {len(body.prompt)}, debug: {body.debug}")
     logger.info(f"附件数量: {len(body.attachments) if body.attachments else 0}")
     
-    if settings.MOCK_MODE:
-        logger.info("Mock 模式已开启，返回 mock 数据")
-        return Response(data=GenerateInitialResponseData(
-            files=MOCK_INITIAL_FILES,
-            message=MOCK_INITIAL_MESSAGE,
-            stages=MOCK_STAGES if body.debug else None
-        ))
+    db = get_database() if body.sessionId else None
+    
+    # if settings.MOCK_MODE:
+    #     logger.info("Mock 模式已开启，返回 mock 数据")
+    #     files = MOCK_INITIAL_FILES
+    #     ai_message = MOCK_INITIAL_MESSAGE
+    #     await update_session_files_only(db, body.sessionId, files)
+    #     return Response(data=GenerateInitialResponseData(
+    #         files=files,
+    #         message=ai_message,
+    #         stages=MOCK_STAGES if body.debug else None
+    #     ))
     
     output_session_id = body.sessionId if body.sessionId else f"no_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
-    db = None
     if body.sessionId is not None:
-        db = get_database()
-        
         if db is None:
             logger.error("数据库未连接")
             raise HTTPException(
@@ -440,7 +432,7 @@ async def generate_initial(body: GenerateInitialRequest):
                     file_extension="md"
                 )
                 logger.info("图片分析结果已保存到 output/ 目录")
-        
+
         requirement_service = RequirementService()
         
         logger.info("阶段1: 需求标准化开始")
@@ -664,46 +656,7 @@ import {{ ref }} from 'vue'
             )
         ]
     
-    if body.sessionId is not None and db is not None:
-        now = datetime.utcnow()
-        
-        user_msg = {
-            "id": str(uuid4()),
-            "role": "user",
-            "content": body.prompt,
-            "timestamp": now
-        }
-        
-        assistant_msg = {
-            "id": str(uuid4()),
-            "role": "assistant",
-            "content": ai_message,
-            "timestamp": now
-        }
-        
-        update_data = {
-            "$push": {
-                "messages": {"$each": [user_msg, assistant_msg]}
-            },
-            "$set": {
-                "updatedAt": now,
-                "files": [f.model_dump() for f in files]
-            }
-        }
-        
-        update_result = await db.sessions.update_one(
-            {"id": body.sessionId},
-            update_data
-        )
-        
-        if update_result.matched_count == 0:
-            logger.error(f"会话不存在 - sessionId: {body.sessionId}")
-            raise HTTPException(
-                status_code=404,
-                detail={"code": ErrorCode.SESSION_NOT_FOUND, "message": "会话不存在", "data": None}
-            )
-        
-        logger.info(f"会话更新成功 - sessionId: {body.sessionId}")
+    await update_session_files_only(db, body.sessionId, files)
     
     return Response(data=GenerateInitialResponseData(
         files=files,
