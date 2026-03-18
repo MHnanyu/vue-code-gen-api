@@ -3,6 +3,7 @@ import json
 import logging
 import re
 from app.config import settings
+from app.utils.json_helper import parse_json_with_repair
 
 logger = logging.getLogger(__name__)
 
@@ -67,34 +68,15 @@ class OpenclawService:
             logger.warning("Openclaw 返回空内容")
             return {"files": [], "message": "生成失败：API返回空内容"}
         
-        try:
-            if isinstance(content, str):
-                content = content.strip()
-                
-                json_match = re.search(r'```json\s*(\{.*?\})\s*```', content, re.DOTALL)
-                if json_match:
-                    content = json_match.group(1)
-                else:
-                    code_match = re.search(r'```\s*(\{.*?\})\s*```', content, re.DOTALL)
-                    if code_match:
-                        content = code_match.group(1)
-                    else:
-                        brace_match = re.search(r'\{.*\}', content, re.DOTALL)
-                        if brace_match:
-                            content = brace_match.group(0)
-                
-                content = content.strip()
-                parsed = json.loads(content)
-            else:
-                parsed = content
-            
-            files = parsed.get("files", [])
-            message = parsed.get("message", "代码生成完成")
-            
-            return {"files": files, "message": message}
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"解析 Openclaw 响应失败: {str(e)}")
+        if isinstance(content, str):
+            content = content.strip()
+        
+        # 使用通用的JSON解析和修复工具
+        parsed, error = parse_json_with_repair(content)
+        
+        if error or parsed is None:
+            logger.error(f"解析 Openclaw 响应失败: {error}")
+            # 如果解析失败，将原始内容作为单个文件返回
             return {
                 "files": [{
                     "id": "main-page",
@@ -102,7 +84,12 @@ class OpenclawService:
                     "path": "/src/MainPage.vue",
                     "type": "file",
                     "language": "vue",
-                    "content": content
+                    "content": content if isinstance(content, str) else str(content)
                 }],
                 "message": "生成完成（原始格式）"
             }
+        
+        files = parsed.get("files", [])
+        message = parsed.get("message", "代码生成完成")
+        
+        return {"files": files, "message": message}

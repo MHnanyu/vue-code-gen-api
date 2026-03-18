@@ -1,10 +1,12 @@
 import json
 import logging
+import re
 from typing import AsyncIterator, Optional, Dict, Any
 import httpx
 
 from app.config import settings
 from app.services.ai_service import AIService
+from app.utils.json_helper import parse_json_with_repair
 
 logger = logging.getLogger(__name__)
 
@@ -77,34 +79,22 @@ class GLM5Service(AIService):
         existing_files: Optional[list[dict]] = None
     ) -> dict:
         if existing_files:
-            system_message = """你是一个Vue3前端代码优化助手。根据用户的修改需求，对现有的Vue组件代码进行优化。
+            system_message = """你是Vue3前端代码优化助手。
 
-重要规则：
-1. 输入N个Vue文件，必须输出N个Vue文件，保持一对一映射
-2. 每个输出文件的id、name、path必须与对应的输入文件完全一致
-3. 只修改content内容，根据用户的修改需求优化代码
-4. 即使某个文件不需要修改，也必须在输出中包含该文件（保持原样）
+【输出格式 - 必须严格遵守】
+直接输出纯JSON，不要有任何前缀说明、后缀解释或markdown标记。
+不要输出 "我来帮你..." 等任何额外文字，直接以 { 开始，以 } 结束。
 
-技术栈：
-- Vue 3 Composition API (<script setup lang="ts">)
-- TypeScript
-- Element Plus (el-开头组件)
-- Tailwind CSS (class样式)
+返回格式示例：
+{"files":[{"id":"xxx","name":"xxx","path":"xxx","type":"file","language":"vue","content":"代码内容"}],"message":"简短说明"}
 
-返回JSON格式：
-{
-  "files": [
-    {
-      "id": "与输入文件的id一致",
-      "name": "与输入文件的name一致",
-      "path": "与输入文件的path一致",
-      "type": "file",
-      "language": "vue",
-      "content": "优化后的完整代码"
-    }
-  ],
-  "message": "修改说明"
-}"""
+【重要规则】
+1. 输入N个文件，必须输出N个文件，保持一对一映射
+2. 每个输出文件的id、name、path必须与输入完全一致
+3. 即使文件不需要修改，也必须包含（保持原样）
+
+【技术栈】
+Vue 3 Composition API (<script setup lang="ts">) + TypeScript + Element Plus + Tailwind CSS"""
             
             files_context = "\n\n".join([
                 f"--- 文件: {f.get('name', 'unknown')} (id: {f.get('id', 'unknown')}) ---\n{f.get('content', '')}"
@@ -112,32 +102,21 @@ class GLM5Service(AIService):
             ])
             user_message = f"现有代码文件：\n{files_context}\n\n修改需求：{prompt}"
         else:
-            system_message = """你是一个Vue3前端开发助手。根据用户需求生成Vue3组件代码。
+            system_message = """你是Vue3前端开发助手。
 
-生成规则：
-1. 只生成必要的Vue组件文件（MainPage.vue及其他自定义组件）
+【输出格式 - 必须严格遵守】
+直接输出纯JSON，不要有任何前缀说明、后缀解释或markdown标记。
+不要输出 "我来帮你..." 等任何额外文字，直接以 { 开始，以 } 结束。
+
+返回格式示例：
+{"files":[{"id":"main-page","name":"MainPage.vue","path":"/src/MainPage.vue","type":"file","language":"vue","content":"代码内容"}],"message":"简短说明"}
+
+【生成规则】
+1. 只生成必要的Vue组件（MainPage.vue及自定义组件）
 2. 不要生成 main.ts, App.vue, index.html 等配置文件
 
-技术栈：
-- Vue 3 Composition API (<script setup lang="ts">)
-- TypeScript
-- Element Plus (el-开头组件)
-- Tailwind CSS (class样式)
-
-返回JSON格式：
-{
-  "files": [
-    {
-      "id": "main-page",
-      "name": "MainPage.vue",
-      "path": "/src/MainPage.vue",
-      "type": "file",
-      "language": "vue",
-      "content": "<template>...</template><script setup lang=\"ts\">...</script><style scoped>...</style>"
-    }
-  ],
-  "message": "生成说明"
-}"""
+【技术栈】
+Vue 3 Composition API (<script setup lang="ts">) + TypeScript + Element Plus + Tailwind CSS"""
             user_message = prompt
         
         messages = [
@@ -154,18 +133,24 @@ class GLM5Service(AIService):
         ):
             result += chunk
         
-        try:
-            data = json.loads(result)
-            if "files" not in data:
-                logger.error(f"AI返回格式错误 - 缺少files字段。原始输出: {result[:500]}")
-                return {
-                    "files": [],
-                    "message": f"返回格式错误。原始输出：{result}"
-                }
-            return data
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON解析失败 - error: {e}, 原始输出: {result[:500]}")
+        json_match = re.search(r'\{[\s\S]*\}', result)
+        json_str = json_match.group(0) if json_match else result
+        
+        # 使用通用的JSON解析和修复工具
+        data, error = parse_json_with_repair(json_str)
+        
+        if error or data is None:
+            logger.error(f"JSON解析失败 - error: {error}, 原始输出: {result[:500]}")
             return {
                 "files": [],
                 "message": f"JSON解析失败。原始输出：{result}"
             }
+        
+        if "files" not in data:
+            logger.error(f"AI返回格式错误 - 缺少files字段。原始输出: {result[:500]}")
+            return {
+                "files": [],
+                "message": f"返回格式错误。原始输出：{result}"
+            }
+        
+        return data
