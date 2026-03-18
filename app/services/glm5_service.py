@@ -79,7 +79,7 @@ class GLM5Service(AIService):
         existing_files: Optional[list[dict]] = None
     ) -> dict:
         if existing_files:
-            system_message = """你是Vue3前端代码优化助手。
+            system_message = """你是Vue3前端原型图优化助手，目标是修改可预览的UI原型。
 
 【输出格式 - 必须严格遵守】
 直接输出纯JSON，不要有任何前缀说明、后缀解释或markdown标记。
@@ -92,9 +92,14 @@ class GLM5Service(AIService):
 1. 输入N个文件，必须输出N个文件，保持一对一映射
 2. 每个输出文件的id、name、path必须与输入完全一致
 3. 即使文件不需要修改，也必须包含（保持原样）
+4. 保持原型极简原则：mock数据即可，不需要真实逻辑
+5. 每个文件代码不超过 300 行
 
 【技术栈】
-Vue 3 Composition API (<script setup lang="ts">) + TypeScript + Element Plus + Tailwind CSS"""
+Vue 3 Composition API (<script setup lang="ts">) + Element Plus + Tailwind CSS
+
+【特别注意】
+- content 字段中的代码必须正确转义：双引号用 \"，换行用 \n"""
             
             files_context = "\n\n".join([
                 f"--- 文件: {f.get('name', 'unknown')} (id: {f.get('id', 'unknown')}) ---\n{f.get('content', '')}"
@@ -102,7 +107,7 @@ Vue 3 Composition API (<script setup lang="ts">) + TypeScript + Element Plus + T
             ])
             user_message = f"现有代码文件：\n{files_context}\n\n修改需求：{prompt}"
         else:
-            system_message = """你是Vue3前端开发助手。
+            system_message = """你是Vue3前端原型图生成助手，目标是生成可预览的UI原型，而非生产代码。
 
 【输出格式 - 必须严格遵守】
 直接输出纯JSON，不要有任何前缀说明、后缀解释或markdown标记。
@@ -111,12 +116,20 @@ Vue 3 Composition API (<script setup lang="ts">) + TypeScript + Element Plus + T
 返回格式示例：
 {"files":[{"id":"main-page","name":"MainPage.vue","path":"/src/MainPage.vue","type":"file","language":"vue","content":"代码内容"}],"message":"简短说明"}
 
-【生成规则】
-1. 只生成必要的Vue组件（MainPage.vue及自定义组件）
-2. 不要生成 main.ts, App.vue, index.html 等配置文件
+【生成规则 - 极简原型原则】
+1. 尽量只生成 MainPage.vue 一个文件，除非页面确实复杂需要拆分（最多3个文件）
+2. template 部分：用 Element Plus 组件 + Tailwind CSS 实现布局和样式，包含完整的UI元素
+3. script 部分：极简化，使用硬编码的 mock 数据，不需要 API 调用、表单验证、computed、watch 等逻辑
+4. 不要定义 interface/type，不需要复杂的 TypeScript 类型
+5. 不要生成 main.ts, App.vue, index.html 等配置文件
+6. 每个文件代码不超过 300 行
 
 【技术栈】
-Vue 3 Composition API (<script setup lang="ts">) + TypeScript + Element Plus + Tailwind CSS"""
+Vue 3 Composition API (<script setup lang="ts">) + Element Plus + Tailwind CSS
+
+【特别注意】
+- content 字段中的代码必须正确转义：双引号用 \"，换行用 \n
+- 这是原型图，重点在于组件位置正确、布局合理、基础样式到位，不需要真实交互逻辑"""
             user_message = prompt
         
         messages = [
