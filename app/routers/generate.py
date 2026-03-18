@@ -433,6 +433,68 @@ async def generate_initial(body: GenerateInitialRequest):
                 )
                 logger.info("图片分析结果已保存到 output/ 目录")
 
+        text_attachments = []
+        if body.attachments:
+            text_attachments = [a for a in body.attachments if a.type in ("text", "markdown")]
+
+        if text_attachments:
+            logger.info(f"检测到 {len(text_attachments)} 个文本附件，开始读取内容...")
+            text_contents = []
+
+            for idx, attachment in enumerate(text_attachments):
+                logger.info(f"读取文本 {idx + 1}/{len(text_attachments)}: {attachment.name}")
+
+                file_url = attachment.url
+                if file_url.startswith("/uploads/"):
+                    local_path = file_url[1:]
+                    if os.path.exists(local_path):
+                        try:
+                            encodings = ["utf-8", "gbk", "gb2312", "latin-1"]
+                            content = None
+                            for enc in encodings:
+                                try:
+                                    with open(local_path, "r", encoding=enc) as f:
+                                        content = f.read()
+                                    break
+                                except (UnicodeDecodeError, LookupError):
+                                    continue
+
+                            if content is not None:
+                                label = "Markdown" if attachment.type == "markdown" else "文本"
+                                text_contents.append(
+                                    f"=== {label}文件 {idx + 1}: {attachment.name} ===\n{content}"
+                                )
+                                logger.info(f"文本文件 {attachment.name} 读取完成，内容长度: {len(content)}")
+                            else:
+                                logger.warning(f"文本文件 {attachment.name} 无法解码")
+                        except Exception as text_err:
+                            logger.error(f"文本文件 {attachment.name} 读取异常: {str(text_err)}")
+                    else:
+                        logger.warning(f"文本文件 {attachment.name} 本地路径不存在: {local_path}")
+
+            if text_contents:
+                combined_text_content = "\n\n".join(text_contents)
+
+                if final_prompt:
+                    final_prompt = f"""{final_prompt}
+
+文本附件内容：
+{combined_text_content}"""
+                else:
+                    final_prompt = f"""文本附件内容：
+{combined_text_content}"""
+
+                logger.info(f"已将文本附件内容拼接到prompt，最终prompt长度: {len(final_prompt)}")
+
+                save_stage_output(
+                    stage_name="text_attachment",
+                    step_number=0,
+                    content=final_prompt,
+                    session_id=output_session_id,
+                    file_extension="md"
+                )
+                logger.info("文本附件内容已保存到 output/ 目录")
+
         requirement_service = RequirementService()
         
         logger.info("阶段1: 需求标准化开始")
