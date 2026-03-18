@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     GLM5_API_URL: str = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
     GLM5_MODEL: str = "glm-5"
     
+    GLM4V_API_KEY: Optional[str] = ""
+    GLM4V_API_URL: str = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    GLM4V_MODEL: str = "glm-4.6v-flashx"
+    
     MINIMAX_API_KEY: Optional[str] = None
     MINIMAX_API_URL: str = ""
     MINIMAX_MODEL: str = ""
@@ -20,6 +24,8 @@ class Settings(BaseSettings):
     OPENCLAW_TOKEN: Optional[str] = ""
     OPENCLAW_AGENT_ID: str = "main"
     OPENCLAW_MODEL: str = "openclaw"
+    
+    MOCK_MODE: bool = True
     
     class Config:
         env_file = ".env"
