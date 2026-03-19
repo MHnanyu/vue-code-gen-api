@@ -115,6 +115,24 @@ async def add_message(sessionId: str, body: MessageCreate):
     return Response(data=message)
 
 
+@router.delete("/{sessionId}/messages/{messageId}", response_model=Response)
+async def delete_message(sessionId: str, messageId: str):
+    db = get_database()
+    result = await db.sessions.update_one(
+        {"id": sessionId},
+        {
+            "$pull": {"messages": {"id": messageId}},
+            "$set": {"updatedAt": datetime.utcnow()}
+        }
+    )
+    if result.matched_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail=Response(code=ErrorCode.SESSION_NOT_FOUND, message="会话不存在").model_dump()
+        )
+    return Response(message="删除成功")
+
+
 @router.patch("/{sessionId}/files", response_model=Response)
 async def update_session_files(sessionId: str, body: SessionFilesUpdate):
     db = get_database()

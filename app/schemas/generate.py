@@ -30,6 +30,10 @@ class GenerateInitialRequest(BaseModel):
     debug: bool = False
     componentLib: str = "ElementUI"
     attachments: Optional[List[Attachment]] = None
+    fromStep: Optional[int] = Field(
+        default=None,
+        description="从指定步骤开始重试，跳过之前已成功的步骤（0=附件处理, 1=需求标准化, 2=代码生成, 3=UX优化）"
+    )
 
 
 class GenerateIterateRequest(BaseModel):
@@ -54,6 +58,10 @@ class GenerateInitialResponseData(BaseModel):
     files: List[GeneratedFile]
     message: str
     stages: Optional[Dict[str, StageResult]] = None
+    failedStep: Optional[int] = Field(
+        default=None,
+        description="失败的步骤编号，前端可直接作为 fromStep 重试（0=附件处理, 1=需求标准化, 2=代码生成, 3=UX优化），null 表示全部成功"
+    )
 
 
 class ImageAnalyzeRequest(BaseModel):
