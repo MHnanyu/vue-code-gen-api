@@ -453,20 +453,33 @@ async def generate_initial(body: GenerateInitialRequest):
             logger.info(f"从步骤 {from_step} 开始重试，尝试加载之前的缓存结果...")
             cached_prompt = load_stage_output(0, "final_prompt", output_session_id, "md")
             if cached_prompt:
-                final_prompt = cached_prompt
-                logger.info(f"已从缓存加载步骤0结果（final_prompt），长度: {len(final_prompt)}")
-                stages["attachment"] = StageResult(
-                    status="success",
-                    duration=None,
-                    output="从缓存加载" if body.debug else None,
-                    error=None
-                )
+                has_image_in_request = any(
+                    a.type == "image" for a in body.attachments
+                ) if body.attachments else False
+                has_image_in_cache = "图片分析结果" in cached_prompt
+
+                if has_image_in_request and not has_image_in_cache:
+                    logger.info(f"检测到当前请求包含图片附件，但缓存的final_prompt中没有图片分析结果，回退到步骤0重新处理")
+                    from_step = 0
+                else:
+                    final_prompt = cached_prompt
+                    logger.info(f"已从缓存加载步骤0结果（final_prompt），长度: {len(final_prompt)}")
+                    stages["attachment"] = StageResult(
+                        status="success",
+                        duration=None,
+                        output="从缓存加载" if body.debug else None,
+                        error=None
+                    )
             else:
                 raise HTTPException(
                     status_code=400,
                     detail={"code": ErrorCode.PARAM_ERROR, "message": f"找不到步骤0的缓存结果，无法从步骤 {from_step} 开始重试。请检查 output/{output_session_id}/step0_final_prompt.md 是否存在", "data": None}
                 )
-        else:
+
+        if from_step is None or from_step == 0:
+            final_prompt = ""
+            if body.prompt:
+                final_prompt = f"用户需求：\n{body.prompt}"
             image_attachments = []
             if body.attachments:
                 image_attachments = [a for a in body.attachments if a.type == "image"]
@@ -506,15 +519,17 @@ async def generate_initial(body: GenerateInitialRequest):
                     except Exception as img_err:
                         logger.error(f"图片 {attachment.name} 分析异常: {str(img_err)}")
                 
+                if not image_descriptions:
+                    logger.warning(f"所有图片分析均失败（共 {len(image_attachments)} 张），图片分析结果将缺失")
+                
                 if image_descriptions:
                     combined_image_desc = "\n\n".join([
                         f"=== 图片 {i+1} 分析结果 ===\n{desc}"
                         for i, desc in enumerate(image_descriptions)
                     ])
                     
-                    if body.prompt:
-                        final_prompt = f"""用户需求：
-{body.prompt}
+                    if final_prompt:
+                        final_prompt = f"""{final_prompt}
 
 图片分析结果：
 {combined_image_desc}"""
@@ -595,6 +610,9 @@ async def generate_initial(body: GenerateInitialRequest):
                         file_extension="md"
                     )
                     logger.info("文本附件内容已保存到 output/ 目录")
+
+            if not final_prompt.strip():
+                logger.warning("步骤0完成但final_prompt为空（无用户需求、无图片分析、无文本附件）")
 
             save_stage_output(
                 stage_name="final_prompt",
@@ -760,6 +778,50 @@ UX规范文档：
             
             files = convert_api_files_to_generated(api_files)
             
+            if not files:
+                logger.warning(f"生成器未生成有效文件 - prompt: {body.prompt[:100] if body.prompt else 'empty'}...")
+                stages["generation"] = StageResult(
+                    status="failed",
+                    duration=round(stage2_duration, 2),
+                    output=None,
+                    error="未能生成有效的代码文件"
+                )
+                ai_message = "代码生成失败：未能生成有效的代码文件，请尝试更详细的需求描述"
+
+                files = [
+                    GeneratedFile(
+                        id="error-page",
+                        name="MainPage.vue",
+                        path="/src/MainPage.vue",
+                        type="file",
+                        language="vue",
+                        content=f"""<template>
+  <div class="p-6">
+    <el-alert
+      title="代码生成失败"
+      type="error"
+      description="{ai_message}"
+      show-icon
+    />
+    <p class="mt-4 text-gray-600">原始需求：{body.prompt or '无'}</p>
+  </div>
+</template>
+
+<script setup lang="ts">
+import {{ ref }} from 'vue'
+</script>"""
+                    )
+                ]
+
+                await update_session_with_ai_message(db, body.sessionId, files, ai_message, 2, stages)
+
+                return Response(data=GenerateInitialResponseData(
+                    files=files,
+                    message=ai_message,
+                    stages=stages,
+                    failedStep=2
+                ))
+            
             stages["generation"] = StageResult(
                 status="success",
                 duration=round(stage2_duration, 2),
@@ -783,11 +845,7 @@ UX规范文档：
                     stage_name="generation"
                 )
             
-            if not files:
-                ai_message = "未能生成有效的代码文件，请尝试更详细的需求描述"
-                logger.warning(f"生成器未生成有效文件 - prompt: {body.prompt[:100]}...")
-            else:
-                logger.info(f"成功生成 {len(files)} 个文件 - message: {ai_message}")
+            logger.info(f"成功生成 {len(files)} 个文件 - message: {ai_message}")
         
         # ====== 步骤3: UX优化（仅 CcUI） ======
         failed_step = 3
@@ -862,6 +920,7 @@ UX规范文档：
     except ValueError as e:
         logger.error(f"AI服务配置错误: {str(e)}")
         ai_message = f"AI服务配置错误: {str(e)}"
+        failed_step = 0
         escaped_prompt = body.prompt.replace('"', '\\"')
         files = [
             GeneratedFile(

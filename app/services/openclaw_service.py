@@ -76,17 +76,9 @@ class OpenclawService:
         
         if error or parsed is None:
             logger.error(f"解析 Openclaw 响应失败: {error}")
-            # 如果解析失败，将原始内容作为单个文件返回
             return {
-                "files": [{
-                    "id": "main-page",
-                    "name": "MainPage.vue",
-                    "path": "/src/MainPage.vue",
-                    "type": "file",
-                    "language": "vue",
-                    "content": content if isinstance(content, str) else str(content)
-                }],
-                "message": "生成完成（原始格式）"
+                "files": [],
+                "message": f"JSON解析失败。原始输出：{content[:500] if content else '空'}"
             }
         
         files = parsed.get("files", [])
