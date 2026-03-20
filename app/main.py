@@ -15,7 +15,9 @@ logging.basicConfig(
 )
 
 UPLOAD_DIR = "uploads"
+OUTPUT_DIR = "output"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 @asynccontextmanager
@@ -44,6 +46,7 @@ app.include_router(sessions.router)
 app.include_router(generate.router)
 
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
 
 @app.get("/")

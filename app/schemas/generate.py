@@ -74,3 +74,60 @@ class ImageAnalyzeResponseData(BaseModel):
     description: str
     rawDescription: str
     success: bool
+
+
+class StageOutput(BaseModel):
+    stage: int
+    stageName: str
+    status: Literal["success", "failed", "skipped", "cached"]
+    duration: Optional[float] = None
+    outputType: Optional[Literal["markdown", "json", "vue"]] = None
+    filePath: Optional[str] = None
+    vueDirPath: Optional[str] = None
+    error: Optional[str] = None
+
+
+class StageStartEvent(BaseModel):
+    stage: int
+    stageName: str
+    isRetry: bool = False
+    timestamp: str
+
+
+class StageProgressEvent(BaseModel):
+    stage: int
+    stageName: str
+    message: str
+    progress: Optional[int] = None
+    timestamp: str
+
+
+class StageCompleteEvent(BaseModel):
+    stage: int
+    stageName: str
+    status: Literal["success", "failed", "skipped", "cached"]
+    duration: Optional[float] = None
+    outputType: Optional[Literal["markdown", "json", "vue"]] = None
+    filePath: Optional[str] = None
+    vueDirPath: Optional[str] = None
+    outputPreview: Optional[str] = None
+    files: Optional[List[GeneratedFile]] = None
+    error: Optional[str] = None
+    timestamp: str
+
+
+class DoneEvent(BaseModel):
+    files: List[GeneratedFile]
+    message: str
+    stages: Dict[str, StageResult]
+    failedStep: Optional[int] = None
+    stageOutputs: Optional[List[StageOutput]] = None
+    timestamp: str
+
+
+class ErrorEvent(BaseModel):
+    code: int
+    message: str
+    failedStep: Optional[int] = None
+    stages: Optional[Dict[str, StageResult]] = None
+    timestamp: str

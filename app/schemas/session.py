@@ -15,6 +15,7 @@ class Message(BaseModel):
     attachments: Optional[List[Attachment]] = None
     failedStep: Optional[int] = Field(default=None, description="失败的步骤编号，前端可直接作为 fromStep 重试")
     stages: Optional[dict] = Field(default=None, description="各步骤执行状态")
+    stageOutputs: Optional[List[dict]] = Field(default=None, description="各步骤产出文件路径元数据")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
