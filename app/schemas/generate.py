@@ -62,6 +62,10 @@ class GenerateInitialResponseData(BaseModel):
         default=None,
         description="失败的步骤编号，前端可直接作为 fromStep 重试（0=附件处理, 1=需求标准化, 2=代码生成, 3=UX优化），null 表示全部成功"
     )
+    stepMessages: Optional[List[dict]] = Field(
+        default=None,
+        description="各步骤的摘要信息"
+    )
 
 
 class ImageAnalyzeRequest(BaseModel):
@@ -122,6 +126,7 @@ class DoneEvent(BaseModel):
     stages: Dict[str, StageResult]
     failedStep: Optional[int] = None
     stageOutputs: Optional[List[StageOutput]] = None
+    stepMessages: Optional[List[dict]] = None
     timestamp: str
 
 

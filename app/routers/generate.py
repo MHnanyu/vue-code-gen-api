@@ -282,7 +282,8 @@ async def update_session_with_ai_message(
     failed_step: int | None,
     stages: dict,
     message_id: str | None = None,
-    stage_outputs: list[dict] | None = None
+    stage_outputs: list[dict] | None = None,
+    step_messages: list[dict] | None = None
 ):
     if session_id is None or db is None:
         return
@@ -296,7 +297,8 @@ async def update_session_with_ai_message(
         content=ai_message,
         failedStep=failed_step,
         stages={k: v.model_dump() if hasattr(v, "model_dump") else v for k, v in stages.items()} if stages else None,
-        stageOutputs=[o if isinstance(o, dict) else o.model_dump() for o in stage_outputs] if stage_outputs else None
+        stageOutputs=[o if isinstance(o, dict) else o.model_dump() for o in stage_outputs] if stage_outputs else None,
+        stepMessages=step_messages
     )
     
     update_result = await db.sessions.update_one(
@@ -318,6 +320,22 @@ async def update_session_with_ai_message(
         )
     
     logger.info(f"会话更新成功（含AI消息）- sessionId: {session_id}, failedStep: {failed_step}, messageId: {ai_msg.id}")
+
+
+def build_step_summary(step_messages: list[dict]) -> str:
+    if not step_messages:
+        return "生成完成"
+    parts = []
+    for sm in step_messages:
+        if sm.get("status") == "failed":
+            parts.append(f"{sm.get('message', '失败')}")
+        elif sm.get("status") == "skipped":
+            continue
+        else:
+            parts.append(sm.get("message", ""))
+    if not parts:
+        return "生成完成"
+    return "，".join(parts) + "。"
 
 
 @router.post("/generate/iterate")
@@ -480,6 +498,7 @@ async def generate_initial(body: GenerateInitialRequest):
     
     stages = {}
     files = []
+    step_messages = []
     ai_message = "生成完成"
     failed_step = None
     
@@ -510,6 +529,15 @@ async def generate_initial(body: GenerateInitialRequest):
                         output="从缓存加载" if body.debug else None,
                         error=None
                     )
+                    image_count = len([a for a in body.attachments if a.type == "image"]) if body.attachments else 0
+                    text_count = len([a for a in body.attachments if a.type in ("text", "markdown")]) if body.attachments else 0
+                    attachment_parts = []
+                    if image_count > 0:
+                        attachment_parts.append(f"{image_count} 张图片")
+                    if text_count > 0:
+                        attachment_parts.append(f"{text_count} 个附件")
+                    msg = f"已加载附件处理结果（{'、'.join(attachment_parts)}）" if attachment_parts else "已加载附件处理结果"
+                    step_messages.append({"stage": 0, "stageName": "attachment", "message": msg, "status": "cached", "duration": None})
             else:
                 raise HTTPException(
                     status_code=400,
@@ -661,6 +689,15 @@ async def generate_initial(body: GenerateInitialRequest):
                 session_id=output_session_id,
                 file_extension="md"
             )
+            image_count = len(image_attachments)
+            text_count = len(text_attachments)
+            attachment_parts = []
+            if image_count > 0:
+                attachment_parts.append(f"{image_count} 张图片")
+            if text_count > 0:
+                attachment_parts.append(f"{text_count} 个附件")
+            msg = f"已处理{'、'.join(attachment_parts)}" if attachment_parts else "已处理用户需求"
+            step_messages.append({"stage": 0, "stageName": "attachment", "message": msg, "status": "success", "duration": None})
         
         # ====== 步骤1: 需求标准化 ======
         failed_step = 1
@@ -675,6 +712,7 @@ async def generate_initial(body: GenerateInitialRequest):
                     output="从缓存加载" if body.debug else None,
                     error=None
                 )
+                step_messages.append({"stage": 1, "stageName": "requirement", "message": "已加载需求标准化结果", "outputPreview": make_preview(requirement_doc), "status": "cached", "duration": None})
             else:
                 raise HTTPException(
                     status_code=400,
@@ -734,17 +772,19 @@ import {{ ref }} from 'vue'
                     )
                 ]
 
-                await update_session_with_ai_message(db, body.sessionId, files, ai_message, 1, stages)
+                await update_session_with_ai_message(db, body.sessionId, files, ai_message, 1, stages, step_messages=step_messages)
 
                 return Response(data=GenerateInitialResponseData(
                     files=files,
                     message=ai_message,
                     stages=stages,
-                    failedStep=1
+                    failedStep=1,
+                    stepMessages=step_messages
                 ))
             
             requirement_doc = stage1_result["output"]
             logger.info(f"阶段1完成 - 需求文档长度: {len(requirement_doc)}")
+            step_messages.append({"stage": 1, "stageName": "requirement", "message": "需求标准化完成", "outputPreview": make_preview(requirement_doc), "status": "success", "duration": stage1_result.get("duration")})
         
         # ====== 步骤2: 代码生成 ======
         failed_step = 2
@@ -762,6 +802,7 @@ import {{ ref }} from 'vue'
                     output=f"从缓存加载 {len(files)} 个文件 ({body.componentLib})" if body.debug else None,
                     error=None
                 )
+                step_messages.append({"stage": 2, "stageName": "generation", "message": f"已加载代码生成结果（{len(files)} 个文件）", "status": "cached", "duration": None})
                 if not files:
                     raise HTTPException(
                         status_code=400,
@@ -853,13 +894,14 @@ import {{ ref }} from 'vue'
                     )
                 ]
 
-                await update_session_with_ai_message(db, body.sessionId, files, ai_message, 2, stages)
+                await update_session_with_ai_message(db, body.sessionId, files, ai_message, 2, stages, step_messages=step_messages)
 
                 return Response(data=GenerateInitialResponseData(
                     files=files,
                     message=ai_message,
                     stages=stages,
-                    failedStep=2
+                    failedStep=2,
+                    stepMessages=step_messages
                 ))
             
             stages["generation"] = StageResult(
@@ -886,6 +928,7 @@ import {{ ref }} from 'vue'
                 )
             
             logger.info(f"成功生成 {len(files)} 个文件 - message: {ai_message}")
+            step_messages.append({"stage": 2, "stageName": "generation", "message": f"生成了 {len(files)} 个 Vue 组件文件（{body.componentLib}）", "status": "success", "duration": round(stage2_duration, 2)})
         
         # ====== 步骤3: UX优化（仅 CcUI） ======
         failed_step = 3
@@ -938,6 +981,10 @@ import {{ ref }} from 'vue'
                     output=f"优化生成了 {len(files)} 个文件" if body.debug else None,
                     error=None
                 )
+                if optimized_files:
+                    step_messages.append({"stage": 3, "stageName": "optimization", "message": f"UX 优化完成（{len(optimized_files)} 个文件）", "status": "success", "duration": round(stage3_duration, 2)})
+                else:
+                    step_messages.append({"stage": 3, "stageName": "optimization", "message": "UX 优化未产出新文件", "status": "success", "duration": round(stage3_duration, 2)})
                 
                 save_stage_output(
                     stage_name="optimization",
@@ -954,6 +1001,10 @@ import {{ ref }} from 'vue'
                         step_number=3,
                         stage_name="optimization"
                     )
+        
+        if body.componentLib.lower() != "ccui":
+            stages["optimization"] = StageResult(status="skipped", duration=0)
+            step_messages.append({"stage": 3, "stageName": "optimization", "message": "跳过（仅 CcUI 组件库需要）", "status": "skipped", "duration": 0})
         
         failed_step = None
             
@@ -994,7 +1045,7 @@ import {{ ref }} from 'vue'
             output=None,
             error=str(e)
         )
-        await update_session_with_ai_message(db, body.sessionId, files, ai_message, failed_step, stages)
+        await update_session_with_ai_message(db, body.sessionId, files, ai_message, failed_step, stages, step_messages=step_messages)
         raise HTTPException(
             status_code=500,
             detail={"code": ErrorCode.INTERNAL_ERROR, "message": f"AI服务配置错误: {str(e)}", "data": None}
@@ -1041,13 +1092,17 @@ import {{ ref }} from 'vue'
             )
         ]
     
-    await update_session_with_ai_message(db, body.sessionId, files, ai_message, failed_step, stages)
+    await update_session_with_ai_message(
+        db, body.sessionId, files, build_step_summary(step_messages), failed_step, stages,
+        step_messages=step_messages
+    )
     
     return Response(data=GenerateInitialResponseData(
         files=files,
-        message=ai_message,
+        message=build_step_summary(step_messages),
         stages=stages,
-        failedStep=failed_step
+        failedStep=failed_step,
+        stepMessages=step_messages
     ))
 
 
@@ -1085,6 +1140,7 @@ async def generate_initial_stream(body: GenerateInitialRequest):
         nonlocal from_step
         stages: dict[str, StageResult] = {}
         stage_outputs: list[StageOutput] = []
+        step_messages: list[dict] = []
         files: list[GeneratedFile] = []
         ai_message = "生成完成"
         failed_step: int | None = None
@@ -1120,6 +1176,15 @@ async def generate_initial_stream(body: GenerateInitialRequest):
                         "outputPreview": make_preview(final_prompt),
                         "timestamp": now_iso()
                     })
+                    image_count = len([a for a in body.attachments if a.type == "image"]) if body.attachments else 0
+                    text_count = len([a for a in body.attachments if a.type in ("text", "markdown")]) if body.attachments else 0
+                    attachment_parts = []
+                    if image_count > 0:
+                        attachment_parts.append(f"{image_count} 张图片")
+                    if text_count > 0:
+                        attachment_parts.append(f"{text_count} 个附件")
+                    msg = f"已加载附件处理结果（{'、'.join(attachment_parts)}）" if attachment_parts else "已加载附件处理结果"
+                    step_messages.append({"stage": 0, "stageName": "attachment", "message": msg, "status": "cached", "duration": None})
             else:
                 yield sse_event("error", {
                     "code": ErrorCode.PARAM_ERROR,
@@ -1221,6 +1286,15 @@ async def generate_initial_stream(body: GenerateInitialRequest):
                     "filePath": file_path, "outputPreview": make_preview(final_prompt),
                     "timestamp": now_iso()
                 })
+                image_count = len(image_attachments)
+                text_count = len(text_attachments)
+                attachment_parts = []
+                if image_count > 0:
+                    attachment_parts.append(f"{image_count} 张图片")
+                if text_count > 0:
+                    attachment_parts.append(f"{text_count} 个附件")
+                msg = f"已处理{'、'.join(attachment_parts)}" if attachment_parts else "已处理用户需求"
+                step_messages.append({"stage": 0, "stageName": "attachment", "message": msg, "status": "success", "duration": stage0_duration})
             except Exception as e:
                 stage0_duration = round(time.time() - stage0_start, 2)
                 stages["attachment"] = StageResult(status="failed", duration=stage0_duration, error=str(e))
@@ -1241,7 +1315,8 @@ async def generate_initial_stream(body: GenerateInitialRequest):
                     await update_session_with_ai_message(
                         db, body.sessionId, files, f"步骤0（附件处理）失败: {str(e)}", 0, stages,
                         message_id=message_id,
-                        stage_outputs=[o.model_dump() for o in stage_outputs]
+                        stage_outputs=[o.model_dump() for o in stage_outputs],
+                        step_messages=step_messages
                     )
                 except Exception as save_err:
                     logger.error(f"[SSE] 写入 session 失败: {str(save_err)}")
@@ -1268,6 +1343,7 @@ async def generate_initial_stream(body: GenerateInitialRequest):
                     "outputPreview": make_preview(requirement_doc),
                     "timestamp": now_iso()
                 })
+                step_messages.append({"stage": 1, "stageName": "requirement", "message": "已加载需求标准化结果", "outputPreview": make_preview(requirement_doc), "status": "cached", "duration": None})
             else:
                 yield sse_event("error", {
                     "code": ErrorCode.PARAM_ERROR,
@@ -1312,7 +1388,8 @@ async def generate_initial_stream(body: GenerateInitialRequest):
                         await update_session_with_ai_message(
                             db, body.sessionId, files, f"步骤1（需求标准化）失败: {error_msg}", 1, stages,
                             message_id=message_id,
-                            stage_outputs=[o.model_dump() for o in stage_outputs]
+                            stage_outputs=[o.model_dump() for o in stage_outputs],
+                            step_messages=step_messages
                         )
                     except Exception as save_err:
                         logger.error(f"[SSE] 写入 session 失败: {str(save_err)}")
@@ -1332,6 +1409,7 @@ async def generate_initial_stream(body: GenerateInitialRequest):
                     "filePath": file_path, "outputPreview": make_preview(requirement_doc),
                     "timestamp": now_iso()
                 })
+                step_messages.append({"stage": 1, "stageName": "requirement", "message": "需求标准化完成", "outputPreview": make_preview(requirement_doc), "status": "success", "duration": stage1_duration})
             except Exception as e:
                 stage1_duration = round(time.time() - stage1_start, 2)
                 stages["requirement"] = StageResult(status="failed", duration=stage1_duration, error=str(e))
@@ -1352,7 +1430,8 @@ async def generate_initial_stream(body: GenerateInitialRequest):
                     await update_session_with_ai_message(
                         db, body.sessionId, files, f"步骤1（需求标准化）失败: {str(e)}", 1, stages,
                         message_id=message_id,
-                        stage_outputs=[o.model_dump() for o in stage_outputs]
+                        stage_outputs=[o.model_dump() for o in stage_outputs],
+                        step_messages=step_messages
                     )
                 except Exception as save_err:
                     logger.error(f"[SSE] 写入 session 失败: {str(save_err)}")
@@ -1382,6 +1461,7 @@ async def generate_initial_stream(body: GenerateInitialRequest):
                     "files": [f.model_dump() for f in files],
                     "timestamp": now_iso()
                 })
+                step_messages.append({"stage": 2, "stageName": "generation", "message": f"已加载代码生成结果（{len(files)} 个文件）", "status": "cached", "duration": None})
             else:
                 yield sse_event("error", {
                     "code": ErrorCode.PARAM_ERROR,
@@ -1447,7 +1527,8 @@ UX规范文档：
                         await update_session_with_ai_message(
                             db, body.sessionId, files, "步骤2（代码生成）失败：未能生成有效的代码文件", 2, stages,
                             message_id=message_id,
-                            stage_outputs=[o.model_dump() for o in stage_outputs]
+                            stage_outputs=[o.model_dump() for o in stage_outputs],
+                            step_messages=step_messages
                         )
                     except Exception as save_err:
                         logger.error(f"[SSE] 写入 session 失败: {str(save_err)}")
@@ -1471,6 +1552,7 @@ UX规范文档：
                     "files": [f.model_dump() for f in files],
                     "timestamp": now_iso()
                 })
+                step_messages.append({"stage": 2, "stageName": "generation", "message": f"生成了 {len(files)} 个 Vue 组件文件（{body.componentLib}）", "status": "success", "duration": stage2_duration})
             except Exception as e:
                 stage2_duration = round(time.time() - stage2_start, 2)
                 stages["generation"] = StageResult(status="failed", duration=stage2_duration, error=str(e))
@@ -1491,7 +1573,8 @@ UX规范文档：
                     await update_session_with_ai_message(
                         db, body.sessionId, files, f"步骤2（代码生成）失败: {str(e)}", 2, stages,
                         message_id=message_id,
-                        stage_outputs=[o.model_dump() for o in stage_outputs]
+                        stage_outputs=[o.model_dump() for o in stage_outputs],
+                        step_messages=step_messages
                     )
                 except Exception as save_err:
                     logger.error(f"[SSE] 写入 session 失败: {str(save_err)}")
@@ -1511,6 +1594,7 @@ UX规范文档：
                     "duration": 0, "outputType": None, "filePath": None,
                     "timestamp": now_iso()
                 })
+                step_messages.append({"stage": 3, "stageName": "optimization", "message": "跳过", "status": "skipped", "duration": 0})
             else:
                 yield sse_event("stage_start", {
                     "stage": 3, "stageName": "optimization",
@@ -1562,6 +1646,10 @@ UX规范文档：
                         "files": [f.model_dump() for f in optimized_files] if optimized_files else None,
                         "timestamp": now_iso()
                     })
+                    if optimized_files:
+                        step_messages.append({"stage": 3, "stageName": "optimization", "message": f"UX 优化完成（{len(optimized_files)} 个文件）", "status": "success", "duration": stage3_duration})
+                    else:
+                        step_messages.append({"stage": 3, "stageName": "optimization", "message": "UX 优化未产出新文件", "status": "success", "duration": stage3_duration})
                 except Exception as e:
                     stage3_duration = round(time.time() - stage3_start, 2)
                     stages["optimization"] = StageResult(status="failed", duration=stage3_duration, error=str(e))
@@ -1579,26 +1667,30 @@ UX规范文档：
                 stage=3, stageName="optimization", status="skipped", duration=0,
                 outputType=None, filePath=None
             ))
+            step_messages.append({"stage": 3, "stageName": "optimization", "message": "跳过（仅 CcUI 组件库需要）", "status": "skipped", "duration": 0})
 
         # ====== 完成 ======
         has_failure = any(v.status == "failed" for v in stages.values()) if stages else False
         if not has_failure:
             failed_step = None
+        summary_message = build_step_summary(step_messages) if not has_failure else ai_message
         try:
             await update_session_with_ai_message(
-                db, body.sessionId, files, ai_message, failed_step, stages,
+                db, body.sessionId, files, summary_message, failed_step, stages,
                 message_id=message_id,
-                stage_outputs=[o.model_dump() for o in stage_outputs]
+                stage_outputs=[o.model_dump() for o in stage_outputs],
+                step_messages=step_messages
             )
         except Exception as e:
             logger.error(f"[SSE] 写入 session 失败: {str(e)}")
 
         yield sse_event("done", {
             "files": [f.model_dump() for f in files],
-            "message": ai_message,
+            "message": summary_message,
             "stages": {k: v.model_dump() for k, v in stages.items()},
             "failedStep": failed_step,
             "stageOutputs": [o.model_dump() for o in stage_outputs],
+            "stepMessages": step_messages,
             "timestamp": now_iso()
         })
 
