@@ -80,17 +80,6 @@ class ImageAnalyzeResponseData(BaseModel):
     success: bool
 
 
-class StageOutput(BaseModel):
-    stage: int
-    stageName: str
-    status: Literal["success", "failed", "skipped", "cached"]
-    duration: Optional[float] = None
-    outputType: Optional[Literal["markdown", "json", "vue"]] = None
-    filePath: Optional[str] = None
-    vueDirPath: Optional[str] = None
-    error: Optional[str] = None
-
-
 class StageStartEvent(BaseModel):
     stage: int
     stageName: str
@@ -110,6 +99,7 @@ class StageCompleteEvent(BaseModel):
     stage: int
     stageName: str
     status: Literal["success", "failed", "skipped", "cached"]
+    message: Optional[str] = None
     duration: Optional[float] = None
     outputType: Optional[Literal["markdown", "json", "vue"]] = None
     filePath: Optional[str] = None
@@ -125,7 +115,6 @@ class DoneEvent(BaseModel):
     message: str
     stages: Dict[str, StageResult]
     failedStep: Optional[int] = None
-    stageOutputs: Optional[List[StageOutput]] = None
     stepMessages: Optional[List[dict]] = None
     timestamp: str
 
