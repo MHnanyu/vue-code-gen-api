@@ -1,8 +1,10 @@
+import asyncio
 import logging
 import os
 import json
 import time
 import uuid
+import random
 from datetime import datetime
 from uuid import uuid4
 
@@ -1134,6 +1136,162 @@ async def generate_initial_stream(body: GenerateInitialRequest):
             detail={"code": ErrorCode.INTERNAL_ERROR, "message": "数据库未连接", "data": None}
         )
 
+    if settings.MOCK_MODE:
+        async def mock_event_stream():
+            import asyncio
+            import random
+
+            stages: dict[str, StageResult] = {}
+            step_messages: list[dict] = []
+            files = MOCK_INITIAL_FILES
+            mock_requirement = "# 需求文档\n\n## 概述\n这是一个基于 Element Plus 的仪表盘页面，包含统计卡片、图表区域和动态时间线。\n\n## 功能模块\n1. 统计卡片展示（用户总数、订单数量、销售额、转化率）\n2. 销售趋势图表\n3. 最新动态时间线"
+
+            start_steps = from_step if from_step is not None else 0
+
+            if start_steps <= 0:
+                yield sse_event("stage_start", {
+                    "stage": 0, "stageName": "attachment", "isRetry": False,
+                    "timestamp": now_iso()
+                })
+                yield sse_event("stage_progress", {
+                    "stage": 0, "stageName": "attachment",
+                    "message": "正在分析附件...", "progress": 50,
+                    "timestamp": now_iso()
+                })
+                await asyncio.sleep(random.uniform(0, 3))
+                stage0_duration = round(random.uniform(0, 3), 2)
+                mock_prompt = f"用户需求：\n{body.prompt}"
+                save_stage_output("final_prompt", 0, mock_prompt, output_session_id, message_id, "md")
+                file_path = build_file_path(output_session_id, message_id, "step0_final_prompt.md")
+                stages["attachment"] = StageResult(status="success", duration=stage0_duration)
+                yield sse_event("stage_complete", {
+                    "stage": 0, "stageName": "attachment", "status": "success",
+                    "message": "已处理用户需求",
+                    "duration": stage0_duration, "outputType": "markdown",
+                    "filePath": file_path,
+                    "outputPreview": make_preview(f"用户需求：\n{body.prompt}"),
+                    "timestamp": now_iso()
+                })
+                step_messages.append({"stage": 0, "stageName": "attachment", "message": "已处理用户需求", "status": "success", "duration": stage0_duration, "outputType": "markdown", "filePath": file_path})
+
+            if start_steps <= 1:
+                yield sse_event("stage_start", {
+                    "stage": 1, "stageName": "requirement", "isRetry": False,
+                    "timestamp": now_iso()
+                })
+                yield sse_event("stage_progress", {
+                    "stage": 1, "stageName": "requirement",
+                    "message": "正在标准化需求文档...", "progress": 50,
+                    "timestamp": now_iso()
+                })
+                await asyncio.sleep(random.uniform(0, 3))
+                stage1_duration = round(random.uniform(0, 3), 2)
+                save_stage_output("requirement", 1, mock_requirement, output_session_id, message_id, "md")
+                file_path = build_file_path(output_session_id, message_id, "step1_requirement.md")
+                stages["requirement"] = StageResult(status="success", duration=stage1_duration)
+                yield sse_event("stage_complete", {
+                    "stage": 1, "stageName": "requirement", "status": "success",
+                    "message": "需求标准化完成",
+                    "duration": stage1_duration, "outputType": "markdown",
+                    "filePath": file_path,
+                    "outputPreview": make_preview(mock_requirement),
+                    "timestamp": now_iso()
+                })
+                step_messages.append({"stage": 1, "stageName": "requirement", "message": "需求标准化完成", "outputPreview": make_preview(mock_requirement), "status": "success", "duration": stage1_duration, "outputType": "markdown", "filePath": file_path})
+
+            if start_steps <= 2:
+                yield sse_event("stage_start", {
+                    "stage": 2, "stageName": "generation", "isRetry": False,
+                    "timestamp": now_iso()
+                })
+                yield sse_event("stage_progress", {
+                    "stage": 2, "stageName": "generation",
+                    "message": "正在生成 Vue 组件代码...", "progress": 30,
+                    "timestamp": now_iso()
+                })
+                await asyncio.sleep(random.uniform(3, 5))
+                yield sse_event("stage_progress", {
+                    "stage": 2, "stageName": "generation",
+                    "message": "正在生成 Vue 组件代码...", "progress": 70,
+                    "timestamp": now_iso()
+                })
+                await asyncio.sleep(random.uniform(2, 5))
+                stage2_duration = round(random.uniform(0, 3), 2)
+                save_stage_output("generation", 2, {"files": [f.model_dump() for f in files], "message": MOCK_INITIAL_MESSAGE}, output_session_id, message_id, "json")
+                save_vue_files_from_json([f.model_dump() for f in files], output_session_id, 2, "generation", message_id)
+                file_path = build_file_path(output_session_id, message_id, "step2_generation.json")
+                vue_dir_path = build_file_path(output_session_id, message_id, "step2_generation_vue")
+                stages["generation"] = StageResult(status="success", duration=stage2_duration)
+                yield sse_event("stage_complete", {
+                    "stage": 2, "stageName": "generation", "status": "success",
+                    "message": f"生成了 {len(files)} 个 Vue 组件文件（Mock 数据）",
+                    "duration": stage2_duration, "outputType": "vue",
+                    "filePath": file_path, "vueDirPath": vue_dir_path,
+                    "files": [f.model_dump() for f in files],
+                    "timestamp": now_iso()
+                })
+                step_messages.append({"stage": 2, "stageName": "generation", "message": f"生成了 {len(files)} 个 Vue 组件文件（Mock 数据）", "status": "success", "duration": stage2_duration, "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path})
+
+            if start_steps <= 3:
+                if body.componentLib.lower() == "ccui":
+                    yield sse_event("stage_start", {
+                        "stage": 3, "stageName": "optimization", "isRetry": False,
+                        "timestamp": now_iso()
+                    })
+                    yield sse_event("stage_progress", {
+                        "stage": 3, "stageName": "optimization",
+                        "message": "正在优化 UX...", "progress": 50,
+                        "timestamp": now_iso()
+                    })
+                    await asyncio.sleep(random.uniform(0, 3))
+                    stage3_duration = round(random.uniform(0, 3), 2)
+                    save_stage_output("optimization", 3, {"files": [f.model_dump() for f in files], "message": "UX 优化完成（Mock 数据）"}, output_session_id, message_id, "json")
+                    save_vue_files_from_json([f.model_dump() for f in files], output_session_id, 3, "optimization", message_id)
+                    file_path = build_file_path(output_session_id, message_id, "step3_optimization.json")
+                    vue_dir_path = build_file_path(output_session_id, message_id, "step3_optimization_vue")
+                    stages["optimization"] = StageResult(status="success", duration=stage3_duration)
+                    yield sse_event("stage_complete", {
+                        "stage": 3, "stageName": "optimization", "status": "success",
+                        "message": "UX 优化完成（Mock 数据）",
+                        "duration": stage3_duration, "outputType": "vue",
+                        "filePath": file_path, "vueDirPath": vue_dir_path,
+                        "files": [f.model_dump() for f in files],
+                        "timestamp": now_iso()
+                    })
+                    step_messages.append({"stage": 3, "stageName": "optimization", "message": "UX 优化完成（Mock 数据）", "status": "success", "duration": stage3_duration, "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path})
+                else:
+                    stages["optimization"] = StageResult(status="skipped", duration=0)
+                    step_messages.append({"stage": 3, "stageName": "optimization", "message": "跳过（仅 CcUI 组件库需要）", "status": "skipped", "duration": 0})
+
+            summary_message = build_step_summary(step_messages)
+            try:
+                await update_session_with_ai_message(
+                    db, body.sessionId, files, summary_message, None, stages,
+                    message_id=message_id,
+                    step_messages=step_messages
+                )
+            except Exception as e:
+                logger.error(f"[SSE Mock] 写入 session 失败: {str(e)}")
+
+            yield sse_event("done", {
+                "files": [f.model_dump() for f in files],
+                "message": summary_message,
+                "stages": {k: v.model_dump() for k, v in stages.items()},
+                "failedStep": None,
+                "stepMessages": step_messages,
+                "timestamp": now_iso()
+            })
+
+        return StreamingResponse(
+            mock_event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
+
     async def event_stream():
         nonlocal from_step
         stages: dict[str, StageResult] = {}
@@ -1661,6 +1819,78 @@ async def generate_iterate_stream(body: GenerateIterateRequest):
         raise HTTPException(
             status_code=500,
             detail={"code": ErrorCode.INTERNAL_ERROR, "message": "数据库未连接", "data": None}
+        )
+
+    if settings.MOCK_MODE:
+        async def mock_event_stream():
+            import asyncio
+            import random
+
+            stages: dict[str, StageResult] = {}
+            files = MOCK_ITERATE_FILES
+            ai_message = MOCK_ITERATE_MESSAGE
+
+            yield sse_event("stage_start", {
+                "stage": 0, "stageName": "iteration", "isRetry": False,
+                "timestamp": now_iso()
+            })
+            yield sse_event("stage_progress", {
+                "stage": 0, "stageName": "iteration",
+                "message": "正在迭代生成代码...", "progress": 40,
+                "timestamp": now_iso()
+            })
+            await asyncio.sleep(random.uniform(0, 1.5))
+            yield sse_event("stage_progress", {
+                "stage": 0, "stageName": "iteration",
+                "message": "正在迭代生成代码...", "progress": 80,
+                "timestamp": now_iso()
+            })
+            await asyncio.sleep(random.uniform(0, 1.5))
+
+            duration = round(random.uniform(0, 3), 2)
+            save_stage_output("iteration", 0, {
+                "prompt": body.prompt,
+                "files": [f.model_dump() for f in files],
+                "message": ai_message
+            }, output_session_id, message_id, "json")
+            save_vue_files_from_json([f.model_dump() for f in files], output_session_id, 0, "iteration", message_id)
+
+            file_path = build_file_path(output_session_id, message_id, "step0_iteration.json")
+            vue_dir_path = build_file_path(output_session_id, message_id, "step0_iteration_vue")
+            stages["iteration"] = StageResult(status="success", duration=duration)
+            yield sse_event("stage_complete", {
+                "stage": 0, "stageName": "iteration", "status": "success",
+                "message": ai_message,
+                "duration": duration, "outputType": "vue",
+                "filePath": file_path, "vueDirPath": vue_dir_path,
+                "files": [f.model_dump() for f in files],
+                "timestamp": now_iso()
+            })
+
+            try:
+                await update_session_with_ai_message(
+                    db, body.sessionId, files, ai_message, None, stages,
+                    message_id=message_id
+                )
+            except Exception as e:
+                logger.error(f"[SSE Mock] 写入 session 失败: {str(e)}")
+
+            yield sse_event("done", {
+                "files": [f.model_dump() for f in files],
+                "message": ai_message,
+                "stages": {k: v.model_dump() for k, v in stages.items()},
+                "failedStep": None,
+                "timestamp": now_iso()
+            })
+
+        return StreamingResponse(
+            mock_event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
         )
 
     async def event_stream():
