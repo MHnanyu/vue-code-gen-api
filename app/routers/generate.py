@@ -8,7 +8,7 @@ import random
 from datetime import datetime
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from typing import Optional
 
@@ -22,6 +22,10 @@ from app.schemas.generate import (
     StageStartEvent, StageCompleteEvent, DoneEvent, ErrorEvent
 )
 from app.utils.sse import sse_event, now_iso, make_preview
+from app.utils.cancellation import (
+    run_with_cancel_check, ClientDisconnectedError, GenerationCancelledError,
+    register_cancel, unregister_cancel, is_cancelled,
+)
 from app.services.ai_factory import AIServiceFactory
 from app.services.requirement_service import RequirementService
 from app.services.openclaw_service import OpenclawService
@@ -1106,8 +1110,14 @@ import {{ ref }} from 'vue'
     ))
 
 
+@router.post("/generate/cancel")
+async def cancel_generation(taskId: str):
+    set_cancel(taskId)
+    return {"code": 0, "message": "取消请求已发送", "data": None}
+
+
 @router.post("/generate/initial/stream")
-async def generate_initial_stream(body: GenerateInitialRequest):
+async def generate_initial_stream(body: GenerateInitialRequest, request: Request):
     logger.info(f"[SSE] 收到初始生成请求 - sessionId: {body.sessionId}, prompt长度: {len(body.prompt)}, fromStep: {body.fromStep}")
 
     from_step = body.fromStep
@@ -1141,146 +1151,200 @@ async def generate_initial_stream(body: GenerateInitialRequest):
             import asyncio
             import random
 
+            cancel_event = register_cancel(message_id)
             stages: dict[str, StageResult] = {}
             step_messages: list[dict] = []
             files = MOCK_INITIAL_FILES
             mock_requirement = "# 需求文档\n\n## 概述\n这是一个基于 Element Plus 的仪表盘页面，包含统计卡片、图表区域和动态时间线。\n\n## 功能模块\n1. 统计卡片展示（用户总数、订单数量、销售额、转化率）\n2. 销售趋势图表\n3. 最新动态时间线"
+            failed_step: int | None = None
 
-            start_steps = from_step if from_step is not None else 0
+            async def mock_sleep(seconds: float):
+                try:
+                    await run_with_cancel_check(
+                        asyncio.sleep(seconds),
+                        request,
+                        task_id=message_id,
+                        poll_interval=0.2,
+                    )
+                except (ClientDisconnectedError, GenerationCancelledError):
+                    return False
+                return True
 
-            if start_steps <= 0:
-                yield sse_event("stage_start", {
-                    "stage": 0, "stageName": "attachment", "isRetry": False,
+            async def on_cancelled():
+                try:
+                    await update_session_with_ai_message(
+                        db, body.sessionId, files, "用户取消了生成", failed_step, stages,
+                        message_id=message_id,
+                        step_messages=step_messages
+                    )
+                except Exception as e:
+                    logger.error(f"[SSE Mock] 取消时写入 session 失败: {str(e)}")
+                yield sse_event("cancelled", {
+                    "cancelledAtStep": failed_step,
+                    "stages": {k: v.model_dump() for k, v in stages.items()},
                     "timestamp": now_iso()
                 })
-                yield sse_event("stage_progress", {
-                    "stage": 0, "stageName": "attachment",
-                    "message": "正在分析附件...", "progress": 50,
-                    "timestamp": now_iso()
-                })
-                await asyncio.sleep(random.uniform(0, 3))
-                stage0_duration = round(random.uniform(0, 3), 2)
-                mock_prompt = f"用户需求：\n{body.prompt}"
-                save_stage_output("final_prompt", 0, mock_prompt, output_session_id, message_id, "md")
-                file_path = build_file_path(output_session_id, message_id, "step0_final_prompt.md")
-                stages["attachment"] = StageResult(status="success", duration=stage0_duration)
-                yield sse_event("stage_complete", {
-                    "stage": 0, "stageName": "attachment", "status": "success",
-                    "message": "已处理用户需求",
-                    "duration": stage0_duration, "outputType": "markdown",
-                    "filePath": file_path,
-                    "outputPreview": make_preview(f"用户需求：\n{body.prompt}"),
-                    "timestamp": now_iso()
-                })
-                step_messages.append({"stage": 0, "stageName": "attachment", "message": "已处理用户需求", "status": "success", "duration": stage0_duration, "outputType": "markdown", "filePath": file_path})
 
-            if start_steps <= 1:
-                yield sse_event("stage_start", {
-                    "stage": 1, "stageName": "requirement", "isRetry": False,
-                    "timestamp": now_iso()
-                })
-                yield sse_event("stage_progress", {
-                    "stage": 1, "stageName": "requirement",
-                    "message": "正在标准化需求文档...", "progress": 50,
-                    "timestamp": now_iso()
-                })
-                await asyncio.sleep(random.uniform(0, 3))
-                stage1_duration = round(random.uniform(0, 3), 2)
-                save_stage_output("requirement", 1, mock_requirement, output_session_id, message_id, "md")
-                file_path = build_file_path(output_session_id, message_id, "step1_requirement.md")
-                stages["requirement"] = StageResult(status="success", duration=stage1_duration)
-                yield sse_event("stage_complete", {
-                    "stage": 1, "stageName": "requirement", "status": "success",
-                    "message": "需求标准化完成",
-                    "duration": stage1_duration, "outputType": "markdown",
-                    "filePath": file_path,
-                    "outputPreview": make_preview(mock_requirement),
-                    "timestamp": now_iso()
-                })
-                step_messages.append({"stage": 1, "stageName": "requirement", "message": "需求标准化完成", "outputPreview": make_preview(mock_requirement), "status": "success", "duration": stage1_duration, "outputType": "markdown", "filePath": file_path})
+            try:
+                start_steps = from_step if from_step is not None else 0
 
-            if start_steps <= 2:
-                yield sse_event("stage_start", {
-                    "stage": 2, "stageName": "generation", "isRetry": False,
-                    "timestamp": now_iso()
-                })
-                yield sse_event("stage_progress", {
-                    "stage": 2, "stageName": "generation",
-                    "message": "正在生成 Vue 组件代码...", "progress": 30,
-                    "timestamp": now_iso()
-                })
-                await asyncio.sleep(random.uniform(3, 5))
-                yield sse_event("stage_progress", {
-                    "stage": 2, "stageName": "generation",
-                    "message": "正在生成 Vue 组件代码...", "progress": 70,
-                    "timestamp": now_iso()
-                })
-                await asyncio.sleep(random.uniform(2, 5))
-                stage2_duration = round(random.uniform(0, 3), 2)
-                save_stage_output("generation", 2, {"files": [f.model_dump() for f in files], "message": MOCK_INITIAL_MESSAGE}, output_session_id, message_id, "json")
-                save_vue_files_from_json([f.model_dump() for f in files], output_session_id, 2, "generation", message_id)
-                file_path = build_file_path(output_session_id, message_id, "step2_generation.json")
-                vue_dir_path = build_file_path(output_session_id, message_id, "step2_generation_vue")
-                stages["generation"] = StageResult(status="success", duration=stage2_duration)
-                yield sse_event("stage_complete", {
-                    "stage": 2, "stageName": "generation", "status": "success",
-                    "message": f"生成了 {len(files)} 个 Vue 组件文件（Mock 数据）",
-                    "duration": stage2_duration, "outputType": "vue",
-                    "filePath": file_path, "vueDirPath": vue_dir_path,
-                    "files": [f.model_dump() for f in files],
-                    "timestamp": now_iso()
-                })
-                step_messages.append({"stage": 2, "stageName": "generation", "message": f"生成了 {len(files)} 个 Vue 组件文件（Mock 数据）", "status": "success", "duration": stage2_duration, "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path})
-
-            if start_steps <= 3:
-                if body.componentLib.lower() == "ccui":
+                if start_steps <= 0:
+                    failed_step = 0
                     yield sse_event("stage_start", {
-                        "stage": 3, "stageName": "optimization", "isRetry": False,
+                        "stage": 0, "stageName": "attachment", "isRetry": False,
+                        "taskId": message_id,
                         "timestamp": now_iso()
                     })
                     yield sse_event("stage_progress", {
-                        "stage": 3, "stageName": "optimization",
-                        "message": "正在优化 UX...", "progress": 50,
+                        "stage": 0, "stageName": "attachment",
+                        "message": "正在分析附件...", "progress": 50,
                         "timestamp": now_iso()
                     })
-                    await asyncio.sleep(random.uniform(0, 3))
-                    stage3_duration = round(random.uniform(0, 3), 2)
-                    save_stage_output("optimization", 3, {"files": [f.model_dump() for f in files], "message": "UX 优化完成（Mock 数据）"}, output_session_id, message_id, "json")
-                    save_vue_files_from_json([f.model_dump() for f in files], output_session_id, 3, "optimization", message_id)
-                    file_path = build_file_path(output_session_id, message_id, "step3_optimization.json")
-                    vue_dir_path = build_file_path(output_session_id, message_id, "step3_optimization_vue")
-                    stages["optimization"] = StageResult(status="success", duration=stage3_duration)
+                    if not await mock_sleep(random.uniform(5, 7)):
+                        async for evt in on_cancelled():
+                            yield evt
+                        return
+                    stage0_duration = round(random.uniform(5, 7), 2)
+                    mock_prompt = f"用户需求：\n{body.prompt}"
+                    save_stage_output("final_prompt", 0, mock_prompt, output_session_id, message_id, "md")
+                    file_path = build_file_path(output_session_id, message_id, "step0_final_prompt.md")
+                    stages["attachment"] = StageResult(status="success", duration=stage0_duration)
                     yield sse_event("stage_complete", {
-                        "stage": 3, "stageName": "optimization", "status": "success",
-                        "message": "UX 优化完成（Mock 数据）",
-                        "duration": stage3_duration, "outputType": "vue",
+                        "stage": 0, "stageName": "attachment", "status": "success",
+                        "message": "已处理用户需求",
+                        "duration": stage0_duration, "outputType": "markdown",
+                        "filePath": file_path,
+                        "outputPreview": make_preview(f"用户需求：\n{body.prompt}"),
+                        "timestamp": now_iso()
+                    })
+                    step_messages.append({"stage": 0, "stageName": "attachment", "message": "已处理用户需求", "status": "success", "duration": stage0_duration, "outputType": "markdown", "filePath": file_path})
+
+                if start_steps <= 1:
+                    failed_step = 1
+                    yield sse_event("stage_start", {
+                        "stage": 1, "stageName": "requirement", "isRetry": False,
+                        "taskId": message_id,
+                        "timestamp": now_iso()
+                    })
+                    yield sse_event("stage_progress", {
+                        "stage": 1, "stageName": "requirement",
+                        "message": "正在标准化需求文档...", "progress": 50,
+                        "timestamp": now_iso()
+                    })
+                    if not await mock_sleep(random.uniform(5, 7)):
+                        async for evt in on_cancelled():
+                            yield evt
+                        return
+                    stage1_duration = round(random.uniform(5, 7), 2)
+                    save_stage_output("requirement", 1, mock_requirement, output_session_id, message_id, "md")
+                    file_path = build_file_path(output_session_id, message_id, "step1_requirement.md")
+                    stages["requirement"] = StageResult(status="success", duration=stage1_duration)
+                    yield sse_event("stage_complete", {
+                        "stage": 1, "stageName": "requirement", "status": "success",
+                        "message": "需求标准化完成",
+                        "duration": stage1_duration, "outputType": "markdown",
+                        "filePath": file_path,
+                        "outputPreview": make_preview(mock_requirement),
+                        "timestamp": now_iso()
+                    })
+                    step_messages.append({"stage": 1, "stageName": "requirement", "message": "需求标准化完成", "outputPreview": make_preview(mock_requirement), "status": "success", "duration": stage1_duration, "outputType": "markdown", "filePath": file_path})
+
+                if start_steps <= 2:
+                    failed_step = 2
+                    yield sse_event("stage_start", {
+                        "stage": 2, "stageName": "generation", "isRetry": False,
+                        "taskId": message_id,
+                        "timestamp": now_iso()
+                    })
+                    yield sse_event("stage_progress", {
+                        "stage": 2, "stageName": "generation",
+                        "message": "正在生成 Vue 组件代码...", "progress": 30,
+                        "timestamp": now_iso()
+                    })
+                    if not await mock_sleep(random.uniform(5, 7)):
+                        async for evt in on_cancelled():
+                            yield evt
+                        return
+                    yield sse_event("stage_progress", {
+                        "stage": 2, "stageName": "generation",
+                        "message": "正在生成 Vue 组件代码...", "progress": 70,
+                        "timestamp": now_iso()
+                    })
+                    if not await mock_sleep(random.uniform(5, 7)):
+                        async for evt in on_cancelled():
+                            yield evt
+                        return
+                    stage2_duration = round(random.uniform(10, 14), 2)
+                    save_stage_output("generation", 2, {"files": [f.model_dump() for f in files], "message": MOCK_INITIAL_MESSAGE}, output_session_id, message_id, "json")
+                    save_vue_files_from_json([f.model_dump() for f in files], output_session_id, 2, "generation", message_id)
+                    file_path = build_file_path(output_session_id, message_id, "step2_generation.json")
+                    vue_dir_path = build_file_path(output_session_id, message_id, "step2_generation_vue")
+                    stages["generation"] = StageResult(status="success", duration=stage2_duration)
+                    yield sse_event("stage_complete", {
+                        "stage": 2, "stageName": "generation", "status": "success",
+                        "message": f"生成了 {len(files)} 个 Vue 组件文件（Mock 数据）",
+                        "duration": stage2_duration, "outputType": "vue",
                         "filePath": file_path, "vueDirPath": vue_dir_path,
                         "files": [f.model_dump() for f in files],
                         "timestamp": now_iso()
                     })
-                    step_messages.append({"stage": 3, "stageName": "optimization", "message": "UX 优化完成（Mock 数据）", "status": "success", "duration": stage3_duration, "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path})
-                else:
-                    stages["optimization"] = StageResult(status="skipped", duration=0)
-                    step_messages.append({"stage": 3, "stageName": "optimization", "message": "跳过（仅 CcUI 组件库需要）", "status": "skipped", "duration": 0})
+                    step_messages.append({"stage": 2, "stageName": "generation", "message": f"生成了 {len(files)} 个 Vue 组件文件（Mock 数据）", "status": "success", "duration": stage2_duration, "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path})
 
-            summary_message = build_step_summary(step_messages)
-            try:
-                await update_session_with_ai_message(
-                    db, body.sessionId, files, summary_message, None, stages,
-                    message_id=message_id,
-                    step_messages=step_messages
-                )
-            except Exception as e:
-                logger.error(f"[SSE Mock] 写入 session 失败: {str(e)}")
+                if start_steps <= 3:
+                    if body.componentLib.lower() == "ccui":
+                        failed_step = 3
+                        yield sse_event("stage_start", {
+                            "stage": 3, "stageName": "optimization", "isRetry": False,
+                            "timestamp": now_iso()
+                        })
+                        yield sse_event("stage_progress", {
+                            "stage": 3, "stageName": "optimization",
+                            "message": "正在优化 UX...", "progress": 50,
+                            "timestamp": now_iso()
+                        })
+                        if not await mock_sleep(random.uniform(5, 7)):
+                            async for evt in on_cancelled():
+                                yield evt
+                            return
+                        stage3_duration = round(random.uniform(5, 7), 2)
+                        save_stage_output("optimization", 3, {"files": [f.model_dump() for f in files], "message": "UX 优化完成（Mock 数据）"}, output_session_id, message_id, "json")
+                        save_vue_files_from_json([f.model_dump() for f in files], output_session_id, 3, "optimization", message_id)
+                        file_path = build_file_path(output_session_id, message_id, "step3_optimization.json")
+                        vue_dir_path = build_file_path(output_session_id, message_id, "step3_optimization_vue")
+                        stages["optimization"] = StageResult(status="success", duration=stage3_duration)
+                        yield sse_event("stage_complete", {
+                            "stage": 3, "stageName": "optimization", "status": "success",
+                            "message": "UX 优化完成（Mock 数据）",
+                            "duration": stage3_duration, "outputType": "vue",
+                            "filePath": file_path, "vueDirPath": vue_dir_path,
+                            "files": [f.model_dump() for f in files],
+                            "timestamp": now_iso()
+                        })
+                        step_messages.append({"stage": 3, "stageName": "optimization", "message": "UX 优化完成（Mock 数据）", "status": "success", "duration": stage3_duration, "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path})
+                    else:
+                        stages["optimization"] = StageResult(status="skipped", duration=0)
+                        step_messages.append({"stage": 3, "stageName": "optimization", "message": "跳过（仅 CcUI 组件库需要）", "status": "skipped", "duration": 0})
 
-            yield sse_event("done", {
-                "files": [f.model_dump() for f in files],
-                "message": summary_message,
-                "stages": {k: v.model_dump() for k, v in stages.items()},
-                "failedStep": None,
-                "stepMessages": step_messages,
-                "timestamp": now_iso()
-            })
+                summary_message = build_step_summary(step_messages)
+                try:
+                    await update_session_with_ai_message(
+                        db, body.sessionId, files, summary_message, None, stages,
+                        message_id=message_id,
+                        step_messages=step_messages
+                    )
+                except Exception as e:
+                    logger.error(f"[SSE Mock] 写入 session 失败: {str(e)}")
+
+                yield sse_event("done", {
+                    "files": [f.model_dump() for f in files],
+                    "message": summary_message,
+                    "stages": {k: v.model_dump() for k, v in stages.items()},
+                    "failedStep": None,
+                    "stepMessages": step_messages,
+                    "timestamp": now_iso()
+                })
+            finally:
+                unregister_cancel(message_id)
 
         return StreamingResponse(
             mock_event_stream(),
@@ -1294,6 +1358,7 @@ async def generate_initial_stream(body: GenerateInitialRequest):
 
     async def event_stream():
         nonlocal from_step
+        cancel_event = register_cancel(message_id)
         stages: dict[str, StageResult] = {}
         step_messages: list[dict] = []
         files: list[GeneratedFile] = []
@@ -1301,6 +1366,28 @@ async def generate_initial_stream(body: GenerateInitialRequest):
         failed_step: int | None = None
         final_prompt = body.prompt
         requirement_doc = None
+
+        def build_cancel_event():
+            return sse_event("cancelled", {
+                "cancelledAtStep": failed_step,
+                "stages": {k: v.model_dump() for k, v in stages.items()},
+                "timestamp": now_iso()
+            })
+
+        async def save_cancel_to_db():
+            try:
+                await update_session_with_ai_message(
+                    db, body.sessionId, files, "用户取消了生成", failed_step, stages,
+                    message_id=message_id,
+                    step_messages=step_messages
+                )
+            except Exception as e:
+                logger.error(f"[SSE] 取消时写入 session 失败: {str(e)}")
+
+        try:
+            pass
+        finally:
+            unregister_cancel(message_id)
 
         # ====== 步骤0: 附件处理 ======
         failed_step = 0
@@ -1347,6 +1434,7 @@ async def generate_initial_stream(body: GenerateInitialRequest):
         if from_step is None or from_step == 0:
             yield sse_event("stage_start", {
                 "stage": 0, "stageName": "attachment", "isRetry": from_step == 0,
+                "taskId": message_id,
                 "timestamp": now_iso()
             })
             stage0_start = time.time()
@@ -1380,11 +1468,19 @@ async def generate_initial_stream(body: GenerateInitialRequest):
                                     image_url = GLM4VService.bytes_to_base64(f.read())
                                     is_base64 = True
                         try:
-                            image_result = await glm4v_service.describe_for_vue_generation(
-                                image_source=image_url, is_base64=is_base64
+                            image_result = await run_with_cancel_check(
+                                glm4v_service.describe_for_vue_generation(
+                                    image_source=image_url, is_base64=is_base64
+                                ),
+                                request,
+                                task_id=message_id,
                             )
                             if image_result.get("success"):
                                 image_descriptions.append(image_result["raw_description"])
+                        except (ClientDisconnectedError, GenerationCancelledError):
+                            yield build_cancel_event()
+                            await save_cancel_to_db()
+                            return
                         except Exception as img_err:
                             logger.error(f"图片 {attachment.name} 分析异常: {str(img_err)}")
 
@@ -1443,6 +1539,10 @@ async def generate_initial_stream(body: GenerateInitialRequest):
                     "timestamp": now_iso()
                 })
                 step_messages.append({"stage": 0, "stageName": "attachment", "message": msg, "status": "success", "duration": stage0_duration, "outputType": "markdown", "filePath": file_path})
+            except (ClientDisconnectedError, GenerationCancelledError):
+                yield build_cancel_event()
+                await save_cancel_to_db()
+                return
             except Exception as e:
                 stage0_duration = round(time.time() - stage0_start, 2)
                 stages["attachment"] = StageResult(status="failed", duration=stage0_duration, error=str(e))
@@ -1497,14 +1597,19 @@ async def generate_initial_stream(body: GenerateInitialRequest):
             yield sse_event("stage_start", {
                 "stage": 1, "stageName": "requirement",
                 "isRetry": from_step is not None,
+                "taskId": message_id,
                 "timestamp": now_iso()
             })
             stage1_start = time.time()
 
             try:
                 requirement_service = RequirementService()
-                stage1_result = await requirement_service.standardize_requirement(
-                    user_requirement=final_prompt, temperature=0.2
+                stage1_result = await run_with_cancel_check(
+                    requirement_service.standardize_requirement(
+                        user_requirement=final_prompt, temperature=0.2
+                    ),
+                    request,
+                    task_id=message_id,
                 )
                 stage1_duration = stage1_result.get("duration", round(time.time() - stage1_start, 2))
 
@@ -1544,6 +1649,10 @@ async def generate_initial_stream(body: GenerateInitialRequest):
                     "timestamp": now_iso()
                 })
                 step_messages.append({"stage": 1, "stageName": "requirement", "message": "需求标准化完成", "outputPreview": make_preview(requirement_doc), "status": "success", "duration": stage1_duration, "outputType": "markdown", "filePath": file_path})
+            except (ClientDisconnectedError, GenerationCancelledError):
+                yield build_cancel_event()
+                await save_cancel_to_db()
+                return
             except Exception as e:
                 stage1_duration = round(time.time() - stage1_start, 2)
                 stages["requirement"] = StageResult(status="failed", duration=stage1_duration, error=str(e))
@@ -1601,6 +1710,7 @@ async def generate_initial_stream(body: GenerateInitialRequest):
             yield sse_event("stage_start", {
                 "stage": 2, "stageName": "generation",
                 "isRetry": from_step is not None,
+                "taskId": message_id,
                 "timestamp": now_iso()
             })
             stage2_start = time.time()
@@ -1623,10 +1733,18 @@ async def generate_initial_stream(body: GenerateInitialRequest):
 ---
 UX规范文档：
 """ + requirement_doc
-                    result = await openclaw_service.generate_vue_files(prompt=ccui_prompt, ccui_prompt="")
+                    result = await run_with_cancel_check(
+                        openclaw_service.generate_vue_files(prompt=ccui_prompt, ccui_prompt=""),
+                        request,
+                        task_id=message_id,
+                    )
                 else:
                     ai_service = AIServiceFactory.get_service()
-                    result = await ai_service.generate_vue_files(prompt=requirement_doc, existing_files=None)
+                    result = await run_with_cancel_check(
+                        ai_service.generate_vue_files(prompt=requirement_doc, existing_files=None),
+                        request,
+                        task_id=message_id,
+                    )
 
                 stage2_duration = round(time.time() - stage2_start, 2)
                 api_files = result.get("files", [])
@@ -1674,6 +1792,10 @@ UX规范文档：
                     "timestamp": now_iso()
                 })
                 step_messages.append({"stage": 2, "stageName": "generation", "message": gen_msg, "status": "success", "duration": stage2_duration, "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path})
+            except (ClientDisconnectedError, GenerationCancelledError):
+                yield build_cancel_event()
+                await save_cancel_to_db()
+                return
             except Exception as e:
                 stage2_duration = round(time.time() - stage2_start, 2)
                 stages["generation"] = StageResult(status="failed", duration=stage2_duration, error=str(e))
@@ -1731,7 +1853,11 @@ UX规范文档：
                     stage2_files_json = json.dumps([f.model_dump() for f in files], ensure_ascii=False, indent=2)
                     full_prompt = f"{optimization_prompt}\n\n待优化的文件：\n{stage2_files_json}\n"
 
-                    stage3_result = await openclaw_service.generate_vue_files(prompt=full_prompt, ccui_prompt="")
+                    stage3_result = await run_with_cancel_check(
+                        openclaw_service.generate_vue_files(prompt=full_prompt, ccui_prompt=""),
+                        request,
+                        task_id=message_id,
+                    )
                     stage3_duration = round(time.time() - stage3_start, 2)
 
                     stage3_api_files = stage3_result.get("files", [])
@@ -1759,6 +1885,8 @@ UX规范文档：
                         "timestamp": now_iso()
                     })
                     step_messages.append({"stage": 3, "stageName": "optimization", "message": opt_msg, "status": "success", "duration": stage3_duration, "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path})
+                except ClientDisconnectedError:
+                    return
                 except Exception as e:
                     stage3_duration = round(time.time() - stage3_start, 2)
                     stages["optimization"] = StageResult(status="failed", duration=stage3_duration, error=str(e))
@@ -1806,7 +1934,7 @@ UX规范文档：
 
 
 @router.post("/generate/iterate/stream")
-async def generate_iterate_stream(body: GenerateIterateRequest):
+async def generate_iterate_stream(body: GenerateIterateRequest, request: Request):
     logger.info(f"[SSE] 收到迭代生成请求 - sessionId: {body.sessionId}, prompt长度: {len(body.prompt)}, 文件数: {len(body.files)}")
 
     db = get_database() if body.sessionId else None
@@ -1826,62 +1954,106 @@ async def generate_iterate_stream(body: GenerateIterateRequest):
             import asyncio
             import random
 
+            cancel_event = register_cancel(message_id)
+
+            async def mock_sleep(seconds: float):
+                try:
+                    await run_with_cancel_check(
+                        asyncio.sleep(seconds),
+                        request,
+                        task_id=message_id,
+                        poll_interval=0.2,
+                    )
+                except (ClientDisconnectedError, GenerationCancelledError):
+                    return False
+                return True
+
             stages: dict[str, StageResult] = {}
             files = MOCK_ITERATE_FILES
             ai_message = MOCK_ITERATE_MESSAGE
 
-            yield sse_event("stage_start", {
-                "stage": 0, "stageName": "iteration", "isRetry": False,
-                "timestamp": now_iso()
-            })
-            yield sse_event("stage_progress", {
-                "stage": 0, "stageName": "iteration",
-                "message": "正在迭代生成代码...", "progress": 40,
-                "timestamp": now_iso()
-            })
-            await asyncio.sleep(random.uniform(0, 1.5))
-            yield sse_event("stage_progress", {
-                "stage": 0, "stageName": "iteration",
-                "message": "正在迭代生成代码...", "progress": 80,
-                "timestamp": now_iso()
-            })
-            await asyncio.sleep(random.uniform(0, 1.5))
-
-            duration = round(random.uniform(0, 3), 2)
-            save_stage_output("iteration", 0, {
-                "prompt": body.prompt,
-                "files": [f.model_dump() for f in files],
-                "message": ai_message
-            }, output_session_id, message_id, "json")
-            save_vue_files_from_json([f.model_dump() for f in files], output_session_id, 0, "iteration", message_id)
-
-            file_path = build_file_path(output_session_id, message_id, "step0_iteration.json")
-            vue_dir_path = build_file_path(output_session_id, message_id, "step0_iteration_vue")
-            stages["iteration"] = StageResult(status="success", duration=duration)
-            yield sse_event("stage_complete", {
-                "stage": 0, "stageName": "iteration", "status": "success",
-                "message": ai_message,
-                "duration": duration, "outputType": "vue",
-                "filePath": file_path, "vueDirPath": vue_dir_path,
-                "files": [f.model_dump() for f in files],
-                "timestamp": now_iso()
-            })
-
             try:
-                await update_session_with_ai_message(
-                    db, body.sessionId, files, ai_message, None, stages,
-                    message_id=message_id
-                )
-            except Exception as e:
-                logger.error(f"[SSE Mock] 写入 session 失败: {str(e)}")
+                yield sse_event("stage_start", {
+                    "stage": 0, "stageName": "iteration", "isRetry": False,
+                    "taskId": message_id,
+                    "timestamp": now_iso()
+                })
+                yield sse_event("stage_progress", {
+                    "stage": 0, "stageName": "iteration",
+                    "message": "正在迭代生成代码...", "progress": 40,
+                    "timestamp": now_iso()
+                })
+                if not await mock_sleep(random.uniform(5, 7)):
+                    try:
+                        await update_session_with_ai_message(
+                            db, body.sessionId, files, "用户取消了生成", 0, stages,
+                            message_id=message_id
+                        )
+                    except Exception:
+                        pass
+                    yield sse_event("cancelled", {
+                        "cancelledAtStep": 0,
+                        "stages": {k: v.model_dump() for k, v in stages.items()},
+                        "timestamp": now_iso()
+                    })
+                    return
+                yield sse_event("stage_progress", {
+                    "stage": 0, "stageName": "iteration",
+                    "message": "正在迭代生成代码...", "progress": 80,
+                    "timestamp": now_iso()
+                })
+                if not await mock_sleep(random.uniform(5, 7)):
+                    try:
+                        await update_session_with_ai_message(
+                            db, body.sessionId, files, "用户取消了生成", 0, stages,
+                            message_id=message_id
+                        )
+                    except Exception:
+                        pass
+                    yield sse_event("cancelled", {
+                        "cancelledAtStep": 0,
+                        "stages": {k: v.model_dump() for k, v in stages.items()},
+                        "timestamp": now_iso()
+                    })
+                    return
 
-            yield sse_event("done", {
-                "files": [f.model_dump() for f in files],
-                "message": ai_message,
-                "stages": {k: v.model_dump() for k, v in stages.items()},
-                "failedStep": None,
-                "timestamp": now_iso()
-            })
+                duration = round(random.uniform(0, 3), 2)
+                save_stage_output("iteration", 0, {
+                    "prompt": body.prompt,
+                    "files": [f.model_dump() for f in files],
+                    "message": ai_message
+                }, output_session_id, message_id, "json")
+                save_vue_files_from_json([f.model_dump() for f in files], output_session_id, 0, "iteration", message_id)
+
+                file_path = build_file_path(output_session_id, message_id, "step0_iteration.json")
+                vue_dir_path = build_file_path(output_session_id, message_id, "step0_iteration_vue")
+                stages["iteration"] = StageResult(status="success", duration=duration)
+                yield sse_event("stage_complete", {
+                    "stage": 0, "stageName": "iteration", "status": "success",
+                    "message": ai_message,
+                    "duration": duration, "outputType": "vue",
+                    "filePath": file_path, "vueDirPath": vue_dir_path,
+                    "files": [f.model_dump() for f in files],
+                    "timestamp": now_iso()
+                })
+
+                try:
+                    await update_session_with_ai_message(
+                        db, body.sessionId, files, ai_message, None, stages,
+                        message_id=message_id
+                    )
+                except Exception as e:
+                    logger.error(f"[SSE Mock] 写入 session 失败: {str(e)}")
+
+                yield sse_event("done", {
+                    "files": [f.model_dump() for f in files],
+                    "message": ai_message,
+                    "stages": {k: v.model_dump() for k, v in stages.items()},
+                    "failedStep": None,
+                    "timestamp": now_iso()
+                })
+            finally:
+                unregister_cancel(message_id)
 
         return StreamingResponse(
             mock_event_stream(),
@@ -1894,93 +2066,115 @@ async def generate_iterate_stream(body: GenerateIterateRequest):
         )
 
     async def event_stream():
+        cancel_event = register_cancel(message_id)
         stages: dict[str, StageResult] = {}
         files: list[GeneratedFile] = []
         ai_message = "代码生成完成"
 
-        yield sse_event("stage_start", {
-            "stage": 0, "stageName": "iteration",
-            "isRetry": False, "timestamp": now_iso()
-        })
-
-        stage_start = time.time()
-
         try:
-            ai_service = AIServiceFactory.get_service()
-            existing_files = [f.model_dump() for f in body.files]
-            result = await ai_service.generate_vue_files(prompt=body.prompt, existing_files=existing_files)
-
-            api_files = result.get("files", [])
-            ai_message = result.get("message", "代码生成完成")
-            files = convert_api_files_to_generated(api_files)
-
-            if not files:
-                ai_message = "未能生成有效的代码文件，请尝试更详细的需求描述"
-
-            duration = round(time.time() - stage_start, 2)
-
-            save_stage_output("iteration", 0, {
-                "prompt": body.prompt,
-                "files": [f.model_dump() for f in files],
-                "message": ai_message
-            }, output_session_id, message_id, "json")
-
-            if api_files:
-                save_vue_files_from_json(api_files, output_session_id, 0, "iteration", message_id)
-
-            file_path = build_file_path(output_session_id, message_id, "step0_iteration.json")
-            vue_dir_path = build_file_path(output_session_id, message_id, "step0_iteration_vue")
-            status = "success" if files else "failed"
-            stages["iteration"] = StageResult(
-                status=status, duration=duration,
-                error=None if files else "未能生成有效的代码文件"
-            )
-            yield sse_event("stage_complete", {
-                "stage": 0, "stageName": "iteration", "status": status,
-                "message": ai_message,
-                "duration": duration, "outputType": "vue",
-                "filePath": file_path, "vueDirPath": vue_dir_path,
-                "files": [f.model_dump() for f in files] if files else None,
-                "error": None if files else "未能生成有效的代码文件",
-                "timestamp": now_iso()
+            yield sse_event("stage_start", {
+                "stage": 0, "stageName": "iteration",
+                "isRetry": False, "taskId": message_id, "timestamp": now_iso()
             })
-        except Exception as e:
-            duration = round(time.time() - stage_start, 2)
-            stages["iteration"] = StageResult(status="failed", duration=duration, error=str(e))
-            yield sse_event("stage_complete", {
-                "stage": 0, "stageName": "iteration", "status": "failed",
-                "message": f"迭代生成失败: {str(e)}",
-                "duration": duration, "error": str(e), "timestamp": now_iso()
-            })
-            yield sse_event("error", {
-                "code": ErrorCode.AI_GENERATE_FAILED, "message": str(e),
-                "failedStep": 0, "stages": {k: v.model_dump() for k, v in stages.items()},
-                "timestamp": now_iso()
-            })
+
+            stage_start = time.time()
+
+            try:
+                ai_service = AIServiceFactory.get_service()
+                existing_files = [f.model_dump() for f in body.files]
+                result = await run_with_cancel_check(
+                    ai_service.generate_vue_files(prompt=body.prompt, existing_files=existing_files),
+                    request,
+                    task_id=message_id,
+                )
+
+                api_files = result.get("files", [])
+                ai_message = result.get("message", "代码生成完成")
+                files = convert_api_files_to_generated(api_files)
+
+                if not files:
+                    ai_message = "未能生成有效的代码文件，请尝试更详细的需求描述"
+
+                duration = round(time.time() - stage_start, 2)
+
+                save_stage_output("iteration", 0, {
+                    "prompt": body.prompt,
+                    "files": [f.model_dump() for f in files],
+                    "message": ai_message
+                }, output_session_id, message_id, "json")
+
+                if api_files:
+                    save_vue_files_from_json(api_files, output_session_id, 0, "iteration", message_id)
+
+                file_path = build_file_path(output_session_id, message_id, "step0_iteration.json")
+                vue_dir_path = build_file_path(output_session_id, message_id, "step0_iteration_vue")
+                status = "success" if files else "failed"
+                stages["iteration"] = StageResult(
+                    status=status, duration=duration,
+                    error=None if files else "未能生成有效的代码文件"
+                )
+                yield sse_event("stage_complete", {
+                    "stage": 0, "stageName": "iteration", "status": status,
+                    "message": ai_message,
+                    "duration": duration, "outputType": "vue",
+                    "filePath": file_path, "vueDirPath": vue_dir_path,
+                    "files": [f.model_dump() for f in files] if files else None,
+                    "error": None if files else "未能生成有效的代码文件",
+                    "timestamp": now_iso()
+                })
+            except (ClientDisconnectedError, GenerationCancelledError):
+                try:
+                    await update_session_with_ai_message(
+                        db, body.sessionId, files, "用户取消了生成", 0, stages,
+                        message_id=message_id
+                    )
+                except Exception:
+                    pass
+                yield sse_event("cancelled", {
+                    "cancelledAtStep": 0,
+                    "stages": {k: v.model_dump() for k, v in stages.items()},
+                    "timestamp": now_iso()
+                })
+                return
+            except Exception as e:
+                duration = round(time.time() - stage_start, 2)
+                stages["iteration"] = StageResult(status="failed", duration=duration, error=str(e))
+                yield sse_event("stage_complete", {
+                    "stage": 0, "stageName": "iteration", "status": "failed",
+                    "message": f"迭代生成失败: {str(e)}",
+                    "duration": duration, "error": str(e), "timestamp": now_iso()
+                })
+                yield sse_event("error", {
+                    "code": ErrorCode.AI_GENERATE_FAILED, "message": str(e),
+                    "failedStep": 0, "stages": {k: v.model_dump() for k, v in stages.items()},
+                    "timestamp": now_iso()
+                })
+                try:
+                    await update_session_with_ai_message(
+                        db, body.sessionId, files, f"迭代生成失败: {str(e)}", 0, stages,
+                        message_id=message_id
+                    )
+                except Exception as save_err:
+                    logger.error(f"[SSE] 写入 session 失败: {str(save_err)}")
+                return
+
             try:
                 await update_session_with_ai_message(
-                    db, body.sessionId, files, f"迭代生成失败: {str(e)}", 0, stages,
+                    db, body.sessionId, files, ai_message, None, stages,
                     message_id=message_id
                 )
-            except Exception as save_err:
-                logger.error(f"[SSE] 写入 session 失败: {str(save_err)}")
-            return
+            except Exception as e:
+                logger.error(f"[SSE] 写入 session 失败: {str(e)}")
 
-        try:
-            await update_session_with_ai_message(
-                db, body.sessionId, files, ai_message, None, stages,
-                message_id=message_id
-            )
-        except Exception as e:
-            logger.error(f"[SSE] 写入 session 失败: {str(e)}")
-
-        yield sse_event("done", {
-            "files": [f.model_dump() for f in files],
-            "message": ai_message,
-            "stages": {k: v.model_dump() for k, v in stages.items()},
-            "failedStep": None,
-            "timestamp": now_iso()
-        })
+            yield sse_event("done", {
+                "files": [f.model_dump() for f in files],
+                "message": ai_message,
+                "stages": {k: v.model_dump() for k, v in stages.items()},
+                "failedStep": None,
+                "timestamp": now_iso()
+            })
+        finally:
+            unregister_cancel(message_id)
 
     return StreamingResponse(
         event_stream(),

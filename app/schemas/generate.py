@@ -85,6 +85,7 @@ class StageStartEvent(BaseModel):
     stageName: str
     isRetry: bool = False
     timestamp: str
+    taskId: Optional[str] = None
 
 
 class StageProgressEvent(BaseModel):
@@ -124,4 +125,10 @@ class ErrorEvent(BaseModel):
     message: str
     failedStep: Optional[int] = None
     stages: Optional[Dict[str, StageResult]] = None
+    timestamp: str
+
+
+class CancelledEvent(BaseModel):
+    cancelledAtStep: Optional[int] = None
+    stages: Dict[str, StageResult]
     timestamp: str
