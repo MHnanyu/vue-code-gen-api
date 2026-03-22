@@ -20,7 +20,6 @@ from app.schemas.generate import (
     ImageAnalyzeRequest, ImageAnalyzeResponseData,
 )
 from app.utils.sse import (
-    make_preview,
     emit_stage_start, emit_stage_progress, emit_stage_complete,
     emit_error, emit_cancelled, emit_done,
 )
@@ -114,7 +113,6 @@ def convert_api_files_to_generated(api_files: list[dict]) -> list[GeneratedFile]
 
 
 def _load_cached_steps_for_session(from_step: int, session_id: str, prev_step_messages: list[dict] | None = None):
-    from app.utils.sse import make_preview
     stages = {}
     step_messages = []
 
@@ -145,7 +143,6 @@ def _load_cached_steps_for_session(from_step: int, session_id: str, prev_step_me
             }
             if isinstance(cached, str):
                 sm["outputType"] = "markdown"
-                sm["outputPreview"] = make_preview(cached)
             elif isinstance(cached, dict) and "files" in cached:
                 sm["outputType"] = "vue"
                 sm["message"] = f"已加载代码生成结果（{len(cached.get('files', []))} 个文件）"
@@ -276,10 +273,11 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                             break
             pre_stages, pre_step_msgs = _load_cached_steps_for_session(from_step, body.sessionId, prev_step_messages)
 
+    existing_message_id = None
     if from_step is not None and body.sessionId and db is not None:
-        await rollback_before_retry(db, body.sessionId)
+        existing_message_id, _ = await rollback_before_retry(db, body.sessionId, from_step)
 
-    message_id = str(uuid4())
+    message_id = existing_message_id if existing_message_id else str(uuid4())
     output_session_id = body.sessionId if body.sessionId else f"no_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     output_dir = os.path.join("output", output_session_id, message_id)
     os.makedirs(output_dir, exist_ok=True)
@@ -378,7 +376,6 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                         yield emit_stage_complete(
                             0, "attachment", "cached",
                             output_type="markdown", file_path=cached_file_path,
-                            output_preview=make_preview(final_prompt),
                         )
                         msg = build_attachment_summary(body.attachments)
                         msg = f"已加载{msg[2:]}" if msg.startswith("已") else msg
@@ -433,7 +430,7 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                     yield emit_stage_complete(
                         0, "attachment", "success", msg,
                         duration=stage0_duration, output_type="markdown",
-                        file_path=file_path, output_preview=make_preview(final_prompt),
+                        file_path=file_path,
                     )
                     step_messages.append({
                         "stage": 0, "stageName": "attachment", "message": msg,
@@ -464,11 +461,10 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                     yield emit_stage_complete(
                         1, "requirement", "cached",
                         output_type="markdown", file_path=cached_file_path,
-                        output_preview=make_preview(requirement_doc),
                     )
                     step_messages.append({
                         "stage": 1, "stageName": "requirement", "message": "已加载需求标准化结果",
-                        "outputPreview": make_preview(requirement_doc), "status": "cached",
+                        "status": "cached",
                         "duration": cached_duration, "outputType": "markdown", "filePath": cached_file_path,
                     })
                 else:
@@ -501,11 +497,11 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                     yield emit_stage_complete(
                         1, "requirement", "success", "需求标准化完成",
                         duration=stage1_duration, output_type="markdown",
-                        file_path=file_path, output_preview=make_preview(requirement_doc),
+                        file_path=file_path,
                     )
                     step_messages.append({
                         "stage": 1, "stageName": "requirement", "message": "需求标准化完成",
-                        "outputPreview": make_preview(requirement_doc), "status": "success",
+                        "status": "success",
                         "duration": stage1_duration, "outputType": "markdown", "filePath": file_path,
                     })
                 except (ClientDisconnectedError, GenerationCancelledError):
@@ -532,18 +528,16 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                     cached_duration = prev_duration_map.get("generation")
                     stages["generation"] = StageResult(status="success", duration=cached_duration)
                     file_path = build_file_path(output_session_id, message_id, "step2_generation.json")
-                    vue_dir_path = build_file_path(output_session_id, message_id, "step2_generation_vue")
                     yield emit_stage_complete(
                         2, "generation", "cached",
                         message=f"已加载代码生成结果（{len(files)} 个文件）",
-                        output_type="vue", file_path=file_path, vue_dir_path=vue_dir_path,
-                        files=files,
+                        output_type="vue", file_path=file_path,
                     )
                     step_messages.append({
                         "stage": 2, "stageName": "generation",
                         "message": f"已加载代码生成结果（{len(files)} 个文件）",
                         "status": "cached", "duration": cached_duration,
-                        "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path,
+                        "outputType": "vue", "filePath": file_path,
                     })
                 else:
                     yield emit_error(ErrorCode.PARAM_ERROR, f"找不到步骤2的缓存结果，无法从步骤 {from_step} 开始重试", 2, stages)
@@ -582,18 +576,17 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                         save_vue_files_from_json(api_files, output_session_id, 2, "generation", message_id)
 
                     file_path = build_file_path(output_session_id, message_id, "step2_generation.json")
-                    vue_dir_path = build_file_path(output_session_id, message_id, "step2_generation_vue")
                     gen_msg = ai_message if ai_message else f"生成了 {len(files)} 个 Vue 组件文件（{body.componentLib}）"
                     stages["generation"] = StageResult(status="success", duration=stage2_duration)
                     yield emit_stage_complete(
                         2, "generation", "success", gen_msg,
                         duration=stage2_duration, output_type="vue",
-                        file_path=file_path, vue_dir_path=vue_dir_path, files=files,
+                        file_path=file_path,
                     )
                     step_messages.append({
                         "stage": 2, "stageName": "generation", "message": gen_msg,
                         "status": "success", "duration": stage2_duration,
-                        "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path,
+                        "outputType": "vue", "filePath": file_path,
                     })
                 except (ClientDisconnectedError, GenerationCancelledError):
                     yield emit_cancelled(failed_step, stages)
@@ -640,19 +633,17 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                             save_vue_files_from_json(stage3_api_files, output_session_id, 3, "optimization", message_id)
 
                         file_path = build_file_path(output_session_id, message_id, "step3_optimization.json")
-                        vue_dir_path = build_file_path(output_session_id, message_id, "step3_optimization_vue")
                         opt_msg = stage3_message if stage3_message else (f"UX 优化完成（{len(optimized_files)} 个文件）" if optimized_files else "UX 优化未产出新文件")
                         stages["optimization"] = StageResult(status="success", duration=stage3_duration)
                         yield emit_stage_complete(
                             3, "optimization", "success", opt_msg,
                             duration=stage3_duration, output_type="vue",
-                            file_path=file_path, vue_dir_path=vue_dir_path,
-                            files=optimized_files if optimized_files else None,
+                            file_path=file_path,
                         )
                         step_messages.append({
                             "stage": 3, "stageName": "optimization", "message": opt_msg,
                             "status": "success", "duration": stage3_duration,
-                            "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path,
+                            "outputType": "vue", "filePath": file_path,
                         })
                     except (ClientDisconnectedError, GenerationCancelledError):
                         yield emit_cancelled(failed_step, stages)
@@ -681,7 +672,7 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
             except Exception as e:
                 logger.error(f"[SSE] 写入 session 失败: {str(e)}")
 
-            yield emit_done(files, summary_message, stages, failed_step=failed_step, step_messages=step_messages)
+            yield emit_done(summary_message, stages, failed_step=failed_step, step_messages=step_messages)
 
         finally:
             unregister_cancel(message_id)
@@ -716,11 +707,12 @@ async def generate_iterate_stream(body: GenerateIterateRequest, request: Request
 
     db = get_database() if body.sessionId else None
 
+    existing_message_id = None
     restored_files = None
     if from_step is not None and body.sessionId and db is not None:
-        restored_files = await rollback_before_retry(db, body.sessionId)
+        existing_message_id, restored_files = await rollback_before_retry(db, body.sessionId, from_step or 0)
 
-    message_id = str(uuid4())
+    message_id = existing_message_id if existing_message_id else str(uuid4())
     output_session_id = body.sessionId if body.sessionId else f"no_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     output_dir = os.path.join("output", output_session_id, message_id)
     os.makedirs(output_dir, exist_ok=True)
@@ -782,7 +774,6 @@ async def generate_iterate_stream(body: GenerateIterateRequest, request: Request
                     save_vue_files_from_json(api_files, output_session_id, 0, "iteration", message_id)
 
                 file_path = build_file_path(output_session_id, message_id, "step0_iteration.json")
-                vue_dir_path = build_file_path(output_session_id, message_id, "step0_iteration_vue")
                 status = "success" if files else "failed"
                 stages["iteration"] = StageResult(
                     status=status, duration=duration,
@@ -791,13 +782,12 @@ async def generate_iterate_stream(body: GenerateIterateRequest, request: Request
                 step_messages.append({
                     "stage": 0, "stageName": "iteration", "message": None,
                     "status": status, "duration": duration,
-                    "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path,
+                    "outputType": "vue", "filePath": file_path,
                 })
                 yield emit_stage_complete(
                     0, "iteration", status, ai_message,
                     duration=duration, output_type="vue",
-                    file_path=file_path, vue_dir_path=vue_dir_path,
-                    files=files if files else None,
+                    file_path=file_path,
                     error=None if files else "未能生成有效的代码文件",
                 )
             except (ClientDisconnectedError, GenerationCancelledError):
@@ -848,7 +838,7 @@ async def generate_iterate_stream(body: GenerateIterateRequest, request: Request
             except Exception as e:
                 logger.error(f"[SSE] 写入 session 失败: {str(e)}")
 
-            yield emit_done(files, ai_message, stages)
+            yield emit_done(ai_message, stages)
         finally:
             unregister_cancel(message_id)
 

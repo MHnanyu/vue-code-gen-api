@@ -235,17 +235,35 @@ async def update_session_with_ai_message(
     logger.info(f"会话更新成功（含AI消息）- sessionId: {session_id}, failedStep: {failed_step}, messageId: {log_id}")
 
 
-async def rollback_before_retry(db, session_id: str) -> list[dict] | None:
+def _delete_stage_files(output_dir: str, step: int):
+    step_files = {
+        0: ["step0_final_prompt.md"],
+        1: ["step1_requirement.md"],
+        2: ["step2_generation.json", "step2_generation_vue"],
+        3: ["step3_optimization.json", "step3_optimization_vue"],
+    }
+    for s in range(step, 4):
+        for filename in step_files.get(s, []):
+            filepath = os.path.join(output_dir, filename)
+            if os.path.isdir(filepath):
+                shutil.rmtree(filepath, ignore_errors=True)
+                logger.info(f"已清理产物目录: {filepath}")
+            elif os.path.exists(filepath):
+                os.remove(filepath)
+                logger.info(f"已清理产物文件: {filepath}")
+
+
+async def rollback_before_retry(db, session_id: str, from_step: int = 0) -> tuple[str | None, list[dict] | None]:
     if session_id is None or db is None:
-        return None
+        return None, None
 
     session = await db.sessions.find_one({"id": session_id})
     if not session:
-        return None
+        return None, None
 
     messages = session.get("messages", [])
     if not messages:
-        return None
+        return None, None
 
     last_ai_idx = None
     for i in range(len(messages) - 1, -1, -1):
@@ -254,7 +272,7 @@ async def rollback_before_retry(db, session_id: str) -> list[dict] | None:
             break
 
     if last_ai_idx is None:
-        return None
+        return None, None
 
     last_ai_msg = messages[last_ai_idx]
     failed_message_id = last_ai_msg.get("id")
@@ -285,11 +303,9 @@ async def rollback_before_retry(db, session_id: str) -> list[dict] | None:
 
     if failed_message_id:
         output_dir = os.path.join("output", session_id, failed_message_id)
-        if os.path.isdir(output_dir):
-            shutil.rmtree(output_dir, ignore_errors=True)
-            logger.info(f"已清理产物目录: {output_dir}")
+        _delete_stage_files(output_dir, from_step)
 
-    return restored_files if restored_files else None
+    return failed_message_id, restored_files if restored_files else None
 
 
 async def write_retry_initial_message(

@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from app.schemas.generate import GeneratedFile, StageResult
+from app.schemas.generate import StageResult
 
 
 def _sse_event(event_type: str, data: dict) -> str:
@@ -11,14 +11,6 @@ def _sse_event(event_type: str, data: dict) -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def make_preview(content: str | None, max_length: int = 500) -> str | None:
-    if not content:
-        return None
-    if len(content) <= max_length:
-        return content
-    return content[:max_length] + "\n...(截断)"
 
 
 def _dump_stages(stages: dict[str, StageResult]) -> dict[str, Any]:
@@ -65,9 +57,6 @@ def emit_stage_complete(
     duration: float | None = None,
     output_type: str | None = None,
     file_path: str | None = None,
-    vue_dir_path: str | None = None,
-    output_preview: str | None = None,
-    files: list[GeneratedFile] | None = None,
     error: str | None = None,
 ) -> str:
     data: dict[str, Any] = {
@@ -84,12 +73,6 @@ def emit_stage_complete(
         data["outputType"] = output_type
     if file_path is not None:
         data["filePath"] = file_path
-    if vue_dir_path is not None:
-        data["vueDirPath"] = vue_dir_path
-    if output_preview is not None:
-        data["outputPreview"] = output_preview
-    if files is not None:
-        data["files"] = [f.model_dump() for f in files]
     if error is not None:
         data["error"] = error
     return _sse_event("stage_complete", data)
@@ -122,14 +105,12 @@ def emit_cancelled(
 
 
 def emit_done(
-    files: list[GeneratedFile],
     message: str,
     stages: dict[str, StageResult],
     failed_step: int | None = None,
     step_messages: list[dict] | None = None,
 ) -> str:
     data: dict[str, Any] = {
-        "files": [f.model_dump() for f in files],
         "message": message,
         "stages": _dump_stages(stages),
         "failedStep": failed_step,

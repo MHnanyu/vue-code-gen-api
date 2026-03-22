@@ -108,15 +108,11 @@ class StageCompleteEvent(BaseModel):
     duration: Optional[float] = None
     outputType: Optional[Literal["markdown", "json", "vue"]] = None
     filePath: Optional[str] = None
-    vueDirPath: Optional[str] = None
-    outputPreview: Optional[str] = None
-    files: Optional[List[GeneratedFile]] = None
     error: Optional[str] = None
     timestamp: str
 
 
 class DoneEvent(BaseModel):
-    files: List[GeneratedFile]
     message: str
     stages: Dict[str, StageResult]
     failedStep: Optional[int] = None

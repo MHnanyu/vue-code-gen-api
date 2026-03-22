@@ -13,10 +13,8 @@ class StepMessage(BaseModel):
     stageName: str = Field(description="步骤名称")
     message: Optional[str] = Field(default=None, description="该步骤的摘要/说明")
     status: Optional[str] = Field(default=None, description="执行状态（success/failed/skipped/cached）")
-    outputPreview: Optional[str] = Field(default=None, description="产出预览（截断）")
     outputType: Optional[str] = Field(default=None, description="产出类型（markdown/json/vue）")
     filePath: Optional[str] = Field(default=None, description="产出文件路径")
-    vueDirPath: Optional[str] = Field(default=None, description="Vue 文件目录路径")
     duration: Optional[float] = Field(default=None, description="执行耗时（秒）")
 
 

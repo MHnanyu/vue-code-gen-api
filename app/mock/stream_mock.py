@@ -16,7 +16,7 @@ from app.utils.cancellation import (
 )
 from app.utils.sse import (
     emit_stage_start, emit_stage_progress, emit_stage_complete,
-    emit_done, emit_cancelled, make_preview,
+    emit_done, emit_cancelled,
 )
 from app.utils.output import (
     save_stage_output, save_vue_files_from_json,
@@ -109,7 +109,7 @@ async def mock_initial_stream(
             yield emit_stage_complete(
                 0, "attachment", "success", "已处理用户需求",
                 duration=stage0_duration, output_type="markdown",
-                file_path=file_path, output_preview=make_preview(mock_prompt),
+                file_path=file_path,
             )
             step_messages.append({
                 "stage": 0, "stageName": "attachment", "message": "已处理用户需求",
@@ -125,11 +125,10 @@ async def mock_initial_stream(
             yield emit_stage_complete(
                 1, "requirement", "cached",
                 output_type="markdown", file_path=cached_file_path,
-                output_preview=make_preview(mock_requirement),
             )
             step_messages.append({
                 "stage": 1, "stageName": "requirement", "message": "已加载需求标准化结果",
-                "outputPreview": make_preview(mock_requirement), "status": "cached",
+                "status": "cached",
                 "duration": cached_duration, "outputType": "markdown", "filePath": cached_file_path,
             })
 
@@ -148,11 +147,11 @@ async def mock_initial_stream(
             yield emit_stage_complete(
                 1, "requirement", "success", "需求标准化完成",
                 duration=stage1_duration, output_type="markdown",
-                file_path=file_path, output_preview=make_preview(mock_requirement),
+                file_path=file_path,
             )
             step_messages.append({
                 "stage": 1, "stageName": "requirement", "message": "需求标准化完成",
-                "outputPreview": make_preview(mock_requirement), "status": "success",
+                "status": "success",
                 "duration": stage1_duration, "outputType": "markdown", "filePath": file_path,
             })
 
@@ -166,18 +165,16 @@ async def mock_initial_stream(
             cached_duration = round(random.uniform(5, 7), 2)
             stages["generation"] = StageResult(status="success", duration=cached_duration)
             cached_file_path = build_file_path(output_session_id, message_id, "step2_generation.json")
-            cached_vue_dir = build_file_path(output_session_id, message_id, "step2_generation_vue")
             yield emit_stage_complete(
                 2, "generation", "cached",
                 message=f"已加载代码生成结果（{len(files)} 个文件）",
-                output_type="vue", file_path=cached_file_path, vue_dir_path=cached_vue_dir,
-                files=files,
+                output_type="vue", file_path=cached_file_path,
             )
             step_messages.append({
                 "stage": 2, "stageName": "generation",
                 "message": f"已加载代码生成结果（{len(files)} 个文件）",
                 "status": "cached", "duration": cached_duration,
-                "outputType": "vue", "filePath": cached_file_path, "vueDirPath": cached_vue_dir,
+                "outputType": "vue", "filePath": cached_file_path,
             })
 
         if start_steps <= 2:
@@ -196,19 +193,18 @@ async def mock_initial_stream(
             )
             save_vue_files_from_json([f.model_dump() for f in files], output_session_id, 2, "generation", message_id)
             file_path = build_file_path(output_session_id, message_id, "step2_generation.json")
-            vue_dir_path = build_file_path(output_session_id, message_id, "step2_generation_vue")
             stages["generation"] = StageResult(status="success", duration=stage2_duration)
             yield emit_stage_complete(
                 2, "generation", "success",
                 f"生成了 {len(files)} 个 Vue 组件文件（Mock 数据）",
                 duration=stage2_duration, output_type="vue",
-                file_path=file_path, vue_dir_path=vue_dir_path, files=files,
+                file_path=file_path,
             )
             step_messages.append({
                 "stage": 2, "stageName": "generation",
                 "message": f"生成了 {len(files)} 个 Vue 组件文件（Mock 数据）",
                 "status": "success", "duration": stage2_duration,
-                "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path,
+                "outputType": "vue", "filePath": file_path,
             })
 
         if start_steps <= 3:
@@ -228,24 +224,44 @@ async def mock_initial_stream(
                 )
                 save_vue_files_from_json([f.model_dump() for f in files], output_session_id, 3, "optimization", message_id)
                 file_path = build_file_path(output_session_id, message_id, "step3_optimization.json")
-                vue_dir_path = build_file_path(output_session_id, message_id, "step3_optimization_vue")
                 stages["optimization"] = StageResult(status="success", duration=stage3_duration)
                 yield emit_stage_complete(
                     3, "optimization", "success", "UX 优化完成（Mock 数据）",
                     duration=stage3_duration, output_type="vue",
-                    file_path=file_path, vue_dir_path=vue_dir_path, files=files,
+                    file_path=file_path,
                 )
                 step_messages.append({
                     "stage": 3, "stageName": "optimization",
                     "message": "UX 优化完成（Mock 数据）",
                     "status": "success", "duration": stage3_duration,
-                    "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path,
+                    "outputType": "vue", "filePath": file_path,
                 })
             else:
-                stages["optimization"] = StageResult(status="skipped", duration=0)
+                yield emit_stage_start(3, "optimization", message_id)
+                yield emit_stage_progress(3, "optimization", "正在优化 UX...", 50)
+                if not await mock_sleep(random.uniform(5, 7)):
+                    async for evt in on_cancelled():
+                        yield evt
+                    return
+                stage3_duration = round(random.uniform(5, 7), 2)
+                save_stage_output(
+                    "optimization", 3,
+                    {"files": [f.model_dump() for f in files], "message": "UX 优化完成（Mock 数据）"},
+                    output_session_id, message_id, "json",
+                )
+                save_vue_files_from_json([f.model_dump() for f in files], output_session_id, 3, "optimization", message_id)
+                file_path = build_file_path(output_session_id, message_id, "step3_optimization.json")
+                stages["optimization"] = StageResult(status="success", duration=stage3_duration)
+                yield emit_stage_complete(
+                    3, "optimization", "success", "UX 优化完成（Mock 数据）",
+                    duration=stage3_duration, output_type="vue",
+                    file_path=file_path,
+                )
                 step_messages.append({
                     "stage": 3, "stageName": "optimization",
-                    "message": "跳过（仅 CcUI 组件库需要）", "status": "skipped", "duration": 0,
+                    "message": "UX 优化完成（Mock 数据）",
+                    "status": "success", "duration": stage3_duration,
+                    "outputType": "vue", "filePath": file_path,
                 })
 
         summary_message = build_step_summary(step_messages)
@@ -258,7 +274,7 @@ async def mock_initial_stream(
         except Exception as e:
             logger.error(f"[SSE Mock] 写入 session 失败: {str(e)}")
 
-        yield emit_done(files, summary_message, stages, step_messages=step_messages)
+        yield emit_done(summary_message, stages, step_messages=step_messages)
     finally:
         unregister_cancel(message_id)
 
@@ -325,17 +341,16 @@ async def mock_iterate_stream(
         save_vue_files_from_json([f.model_dump() for f in files], output_session_id, 0, "iteration", message_id)
 
         file_path = build_file_path(output_session_id, message_id, "step0_iteration.json")
-        vue_dir_path = build_file_path(output_session_id, message_id, "step0_iteration_vue")
         stages["iteration"] = StageResult(status="success", duration=duration)
         step_messages.append({
             "stage": 0, "stageName": "iteration", "message": None,
             "status": "success", "duration": duration,
-            "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path,
+            "outputType": "vue", "filePath": file_path,
         })
         yield emit_stage_complete(
             0, "iteration", "success", ai_message,
             duration=duration, output_type="vue",
-            file_path=file_path, vue_dir_path=vue_dir_path, files=files,
+            file_path=file_path,
         )
 
         try:
@@ -347,6 +362,6 @@ async def mock_iterate_stream(
         except Exception as e:
             logger.error(f"[SSE Mock] 写入 session 失败: {str(e)}")
 
-        yield emit_done(files, ai_message, stages)
+        yield emit_done(ai_message, stages)
     finally:
         unregister_cancel(message_id)
