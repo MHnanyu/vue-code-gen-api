@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import shutil
 from datetime import datetime
 from uuid import uuid4
 
@@ -173,7 +174,8 @@ async def update_session_with_ai_message(
     failed_step: int | None,
     stages: dict,
     message_id: str | None = None,
-    step_messages: list[dict] | None = None
+    step_messages: list[dict] | None = None,
+    retry_message_id: str | None = None,
 ):
     if session_id is None or db is None:
         return
@@ -181,25 +183,47 @@ async def update_session_with_ai_message(
     from app.schemas.session import Message
 
     now = datetime.utcnow()
-    ai_msg = Message(
-        id=message_id or str(uuid4()),
-        role="assistant",
-        content=ai_message,
-        failedStep=failed_step,
-        stages={k: v.model_dump() if hasattr(v, "model_dump") else v for k, v in stages.items()} if stages else None,
-        stepMessages=step_messages
-    )
+    stage_dump = {k: v.model_dump() if hasattr(v, "model_dump") else v for k, v in stages.items()} if stages else None
+    files_dump = [f.model_dump() for f in files]
 
-    update_result = await db.sessions.update_one(
-        {"id": session_id},
-        {
-            "$push": {"messages": ai_msg.model_dump()},
-            "$set": {
-                "updatedAt": now,
-                "files": [f.model_dump() for f in files]
+    if retry_message_id:
+        update_result = await db.sessions.update_one(
+            {"id": session_id, "messages.id": retry_message_id},
+            {
+                "$set": {
+                    "messages.$.content": ai_message,
+                    "messages.$.failedStep": failed_step,
+                    "messages.$.stages": stage_dump,
+                    "messages.$.stepMessages": step_messages,
+                    "messages.$.files": files_dump if files_dump else None,
+                    "updatedAt": now,
+                    "files": files_dump,
+                }
             }
-        }
-    )
+        )
+        log_id = retry_message_id
+    else:
+        ai_msg = Message(
+            id=message_id or str(uuid4()),
+            role="assistant",
+            content=ai_message,
+            failedStep=failed_step,
+            stages=stage_dump,
+            stepMessages=step_messages,
+            files=files_dump if files_dump else None,
+        )
+
+        update_result = await db.sessions.update_one(
+            {"id": session_id},
+            {
+                "$push": {"messages": ai_msg.model_dump()},
+                "$set": {
+                    "updatedAt": now,
+                    "files": files_dump,
+                }
+            }
+        )
+        log_id = ai_msg.id
 
     if update_result.matched_count == 0:
         logger.error(f"会话不存在 - sessionId: {session_id}")
@@ -208,4 +232,95 @@ async def update_session_with_ai_message(
             detail={"code": ErrorCode.SESSION_NOT_FOUND, "message": "会话不存在", "data": None}
         )
 
-    logger.info(f"会话更新成功（含AI消息）- sessionId: {session_id}, failedStep: {failed_step}, messageId: {ai_msg.id}")
+    logger.info(f"会话更新成功（含AI消息）- sessionId: {session_id}, failedStep: {failed_step}, messageId: {log_id}")
+
+
+async def rollback_before_retry(db, session_id: str) -> list[dict] | None:
+    if session_id is None or db is None:
+        return None
+
+    session = await db.sessions.find_one({"id": session_id})
+    if not session:
+        return None
+
+    messages = session.get("messages", [])
+    if not messages:
+        return None
+
+    last_ai_idx = None
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "assistant":
+            last_ai_idx = i
+            break
+
+    if last_ai_idx is None:
+        return None
+
+    last_ai_msg = messages[last_ai_idx]
+    failed_message_id = last_ai_msg.get("id")
+
+    messages.pop(last_ai_idx)
+
+    restored_files: list[dict] = []
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "assistant":
+            prev_files = messages[i].get("files")
+            if prev_files is not None:
+                restored_files = prev_files
+            break
+
+    now = datetime.utcnow()
+    await db.sessions.update_one(
+        {"id": session_id},
+        {
+            "$set": {
+                "messages": messages,
+                "files": restored_files,
+                "updatedAt": now,
+            }
+        }
+    )
+
+    logger.info(f"重试回滚完成 - sessionId: {session_id}, 移除消息: {failed_message_id}, 恢复文件数: {len(restored_files)}")
+
+    if failed_message_id:
+        output_dir = os.path.join("output", session_id, failed_message_id)
+        if os.path.isdir(output_dir):
+            shutil.rmtree(output_dir, ignore_errors=True)
+            logger.info(f"已清理产物目录: {output_dir}")
+
+    return restored_files if restored_files else None
+
+
+async def write_retry_initial_message(
+    db,
+    session_id: str,
+    message_id: str,
+    stages: dict,
+    step_messages: list[dict],
+):
+    if session_id is None or db is None:
+        return
+
+    from app.schemas.session import Message
+
+    now = datetime.utcnow()
+    stage_dump = {k: v.model_dump() if hasattr(v, "model_dump") else v for k, v in stages.items()} if stages else None
+    msg = Message(
+        id=message_id,
+        role="assistant",
+        content="正在重试...",
+        failedStep=None,
+        stages=stage_dump,
+        stepMessages=step_messages,
+        files=None,
+    )
+
+    await db.sessions.update_one(
+        {"id": session_id},
+        {
+            "$push": {"messages": msg.model_dump()},
+            "$set": {"updatedAt": now},
+        }
+    )
+    logger.info(f"重试初始消息已写入 - sessionId: {session_id}, messageId: {message_id}, 缓存步骤数: {len(step_messages)}")

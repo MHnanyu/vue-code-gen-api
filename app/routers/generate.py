@@ -27,6 +27,7 @@ from app.utils.sse import (
 from app.utils.output import (
     load_stage_output, save_stage_output, save_vue_files_from_json,
     build_file_path, build_step_summary, update_session_with_ai_message,
+    rollback_before_retry, write_retry_initial_message,
 )
 from app.utils.cancellation import (
     run_with_cancel_check, ClientDisconnectedError, GenerationCancelledError,
@@ -110,6 +111,47 @@ def convert_api_files_to_generated(api_files: list[dict]) -> list[GeneratedFile]
         )
         for i, file in enumerate(api_files)
     ]
+
+
+def _load_cached_steps_for_session(from_step: int, session_id: str, prev_step_messages: list[dict] | None = None):
+    from app.utils.sse import make_preview
+    stages = {}
+    step_messages = []
+
+    prev_duration_map = {}
+    if prev_step_messages:
+        for sm in prev_step_messages:
+            stage_key = sm.get("stageName")
+            duration = sm.get("duration")
+            if stage_key and duration is not None:
+                prev_duration_map[stage_key] = duration
+
+    configs = [
+        (0, "final_prompt", "md", "attachment", "已加载附件处理结果"),
+        (1, "requirement", "md", "requirement", "已加载需求标准化结果"),
+        (2, "generation", "json", "generation", "已加载代码生成结果"),
+    ]
+
+    for step_num, stage_name, ext, stage_key, message in configs:
+        if from_step > step_num:
+            cached = load_stage_output(step_num, stage_name, session_id, ext)
+            if cached is None:
+                return None, None
+            cached_duration = prev_duration_map.get(stage_key)
+            stages[stage_key] = StageResult(status="success", duration=cached_duration)
+            sm = {
+                "stage": step_num, "stageName": stage_key,
+                "message": message, "status": "cached", "duration": cached_duration,
+            }
+            if isinstance(cached, str):
+                sm["outputType"] = "markdown"
+                sm["outputPreview"] = make_preview(cached)
+            elif isinstance(cached, dict) and "files" in cached:
+                sm["outputType"] = "vue"
+                sm["message"] = f"已加载代码生成结果（{len(cached.get('files', []))} 个文件）"
+            step_messages.append(sm)
+
+    return stages, step_messages
 
 
 def make_error_vue_page(title: str, description: str, prompt: str) -> GeneratedFile:
@@ -214,10 +256,38 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
             )
 
     db = get_database() if body.sessionId else None
+
+    pre_stages, pre_step_msgs = None, None
+    if from_step is not None and from_step > 0 and body.sessionId:
+        need_reset = False
+        if body.attachments and any(a.type == "image" for a in body.attachments):
+            cached = load_stage_output(0, "final_prompt", body.sessionId, "md")
+            if cached and "图片分析结果" not in cached:
+                need_reset = True
+        if not need_reset:
+            prev_step_messages = None
+            if db is not None:
+                session = await db.sessions.find_one({"id": body.sessionId}, {"messages": 1})
+                if session and "messages" in session:
+                    messages = session["messages"]
+                    for i in range(len(messages) - 1, -1, -1):
+                        if messages[i].get("role") == "assistant":
+                            prev_step_messages = messages[i].get("stepMessages")
+                            break
+            pre_stages, pre_step_msgs = _load_cached_steps_for_session(from_step, body.sessionId, prev_step_messages)
+
+    if from_step is not None and body.sessionId and db is not None:
+        await rollback_before_retry(db, body.sessionId)
+
     message_id = str(uuid4())
     output_session_id = body.sessionId if body.sessionId else f"no_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     output_dir = os.path.join("output", output_session_id, message_id)
     os.makedirs(output_dir, exist_ok=True)
+
+    retry_message_id = None
+    if pre_stages is not None and db is not None:
+        await write_retry_initial_message(db, body.sessionId, message_id, pre_stages, pre_step_msgs)
+        retry_message_id = message_id
 
     if body.sessionId is not None and db is None:
         raise HTTPException(
@@ -225,10 +295,16 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
             detail={"code": ErrorCode.INTERNAL_ERROR, "message": "数据库未连接", "data": None}
         )
 
+    prev_duration_map: dict[str, float | None] = {}
+    if pre_stages:
+        for stage_key, stage_result in pre_stages.items():
+            if stage_result.duration is not None:
+                prev_duration_map[stage_key] = stage_result.duration
+
     if settings.MOCK_MODE:
         from app.mock.stream_mock import mock_initial_stream
         return StreamingResponse(
-            mock_initial_stream(request, body, db, message_id, output_session_id, from_step),
+            mock_initial_stream(request, body, db, message_id, output_session_id, from_step, retry_message_id),
             media_type="text/event-stream",
             headers=SSE_HEADERS,
         )
@@ -246,11 +322,18 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
 
         progress_queue: asyncio.Queue[str] = asyncio.Queue()
 
+        stage_name_map = {0: "attachment", 1: "requirement", 2: "generation", 3: "optimization"}
+
         async def save_cancel_to_db():
+            if failed_step is not None:
+                current_stage_name = stage_name_map.get(failed_step)
+                if current_stage_name and current_stage_name not in stages:
+                    stages[current_stage_name] = StageResult(status="cancelled")
             try:
                 await update_session_with_ai_message(
                     db, body.sessionId, files, "用户取消了生成", failed_step, stages,
                     message_id=message_id, step_messages=step_messages,
+                    retry_message_id=retry_message_id,
                 )
             except Exception as e:
                 logger.error(f"[SSE] 取消时写入 session 失败: {str(e)}")
@@ -267,6 +350,7 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                 await update_session_with_ai_message(
                     db, body.sessionId, files, f"步骤{step}（{stage_name}）失败: {error_msg}",
                     step, stages, message_id=message_id, step_messages=step_messages,
+                    retry_message_id=retry_message_id,
                 )
             except Exception as save_err:
                 logger.error(f"[SSE] 写入 session 失败: {str(save_err)}")
@@ -289,7 +373,8 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                         final_prompt = cached_prompt
                         cached_file_path = build_file_path(output_session_id, message_id, "step0_final_prompt.md")
                         save_stage_output("final_prompt", 0, final_prompt, output_session_id, message_id, "md")
-                        stages["attachment"] = StageResult(status="success", duration=None)
+                        cached_duration = prev_duration_map.get("attachment")
+                        stages["attachment"] = StageResult(status="success", duration=cached_duration)
                         yield emit_stage_complete(
                             0, "attachment", "cached",
                             output_type="markdown", file_path=cached_file_path,
@@ -299,7 +384,7 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                         msg = f"已加载{msg[2:]}" if msg.startswith("已") else msg
                         step_messages.append({
                             "stage": 0, "stageName": "attachment", "message": msg,
-                            "status": "cached", "duration": None,
+                            "status": "cached", "duration": cached_duration,
                             "outputType": "markdown", "filePath": cached_file_path,
                         })
                 else:
@@ -374,7 +459,8 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                     requirement_doc = cached_requirement
                     cached_file_path = build_file_path(output_session_id, message_id, "step1_requirement.md")
                     save_stage_output("requirement", 1, requirement_doc, output_session_id, message_id, "md")
-                    stages["requirement"] = StageResult(status="success", duration=None)
+                    cached_duration = prev_duration_map.get("requirement")
+                    stages["requirement"] = StageResult(status="success", duration=cached_duration)
                     yield emit_stage_complete(
                         1, "requirement", "cached",
                         output_type="markdown", file_path=cached_file_path,
@@ -383,7 +469,7 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                     step_messages.append({
                         "stage": 1, "stageName": "requirement", "message": "已加载需求标准化结果",
                         "outputPreview": make_preview(requirement_doc), "status": "cached",
-                        "duration": None, "outputType": "markdown", "filePath": cached_file_path,
+                        "duration": cached_duration, "outputType": "markdown", "filePath": cached_file_path,
                     })
                 else:
                     yield emit_error(ErrorCode.PARAM_ERROR, f"找不到步骤1的缓存结果，无法从步骤 {from_step} 开始重试", 1, stages)
@@ -443,7 +529,8 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                     api_files = result.get("files", [])
                     files = convert_api_files_to_generated(api_files)
                     ai_message = result.get("message", f"代码生成完成（{body.componentLib}）")
-                    stages["generation"] = StageResult(status="success", duration=None)
+                    cached_duration = prev_duration_map.get("generation")
+                    stages["generation"] = StageResult(status="success", duration=cached_duration)
                     file_path = build_file_path(output_session_id, message_id, "step2_generation.json")
                     vue_dir_path = build_file_path(output_session_id, message_id, "step2_generation_vue")
                     yield emit_stage_complete(
@@ -455,7 +542,7 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                     step_messages.append({
                         "stage": 2, "stageName": "generation",
                         "message": f"已加载代码生成结果（{len(files)} 个文件）",
-                        "status": "cached", "duration": None,
+                        "status": "cached", "duration": cached_duration,
                         "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path,
                     })
                 else:
@@ -589,6 +676,7 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                 await update_session_with_ai_message(
                     db, body.sessionId, files, summary_message, failed_step, stages,
                     message_id=message_id, step_messages=step_messages,
+                    retry_message_id=retry_message_id,
                 )
             except Exception as e:
                 logger.error(f"[SSE] 写入 session 失败: {str(e)}")
@@ -611,13 +699,36 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
 
 @router.post("/generate/iterate/stream")
 async def generate_iterate_stream(body: GenerateIterateRequest, request: Request):
-    logger.info(f"[SSE] 收到迭代生成请求 - sessionId: {body.sessionId}, prompt长度: {len(body.prompt)}, 文件数: {len(body.files)}")
+    from_step = body.fromStep
+    logger.info(f"[SSE] 收到迭代生成请求 - sessionId: {body.sessionId}, prompt长度: {len(body.prompt)}, 文件数: {len(body.files)}, fromStep: {from_step}")
+
+    if from_step is not None:
+        if from_step != 0:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": ErrorCode.PARAM_ERROR, "message": "iterate 的 fromStep 仅支持 0", "data": None}
+            )
+        if not body.sessionId:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": ErrorCode.PARAM_ERROR, "message": "使用 fromStep 重试时必须提供 sessionId", "data": None}
+            )
 
     db = get_database() if body.sessionId else None
+
+    restored_files = None
+    if from_step is not None and body.sessionId and db is not None:
+        restored_files = await rollback_before_retry(db, body.sessionId)
+
     message_id = str(uuid4())
     output_session_id = body.sessionId if body.sessionId else f"no_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     output_dir = os.path.join("output", output_session_id, message_id)
     os.makedirs(output_dir, exist_ok=True)
+
+    retry_message_id = None
+    if from_step is not None and body.sessionId and db is not None:
+        await write_retry_initial_message(db, body.sessionId, message_id, {}, [])
+        retry_message_id = message_id
 
     if body.sessionId is not None and db is None:
         raise HTTPException(
@@ -628,7 +739,7 @@ async def generate_iterate_stream(body: GenerateIterateRequest, request: Request
     if settings.MOCK_MODE:
         from app.mock.stream_mock import mock_iterate_stream
         return StreamingResponse(
-            mock_iterate_stream(request, body, db, message_id, output_session_id),
+            mock_iterate_stream(request, body, db, message_id, output_session_id, from_step, retry_message_id),
             media_type="text/event-stream",
             headers=SSE_HEADERS,
         )
@@ -636,16 +747,17 @@ async def generate_iterate_stream(body: GenerateIterateRequest, request: Request
     async def event_stream() -> AsyncGenerator[str, None]:
         register_cancel(message_id)
         stages: dict[str, StageResult] = {}
+        step_messages: list[dict] = []
         files: list[GeneratedFile] = []
         ai_message = "代码生成完成"
 
         try:
-            yield emit_stage_start(0, "iteration", message_id)
+            yield emit_stage_start(0, "iteration", message_id, is_retry=from_step is not None)
             stage_start = time.time()
 
             try:
                 ai_service = AIServiceFactory.get_service()
-                existing_files = [f.model_dump() for f in body.files]
+                existing_files = restored_files if restored_files is not None else [f.model_dump() for f in body.files]
                 result = await run_with_cancel_check(
                     ai_service.generate_vue_files(prompt=body.prompt, existing_files=existing_files),
                     request, task_id=message_id,
@@ -676,6 +788,11 @@ async def generate_iterate_stream(body: GenerateIterateRequest, request: Request
                     status=status, duration=duration,
                     error=None if files else "未能生成有效的代码文件",
                 )
+                step_messages.append({
+                    "stage": 0, "stageName": "iteration", "message": None,
+                    "status": status, "duration": duration,
+                    "outputType": "vue", "filePath": file_path, "vueDirPath": vue_dir_path,
+                })
                 yield emit_stage_complete(
                     0, "iteration", status, ai_message,
                     duration=duration, output_type="vue",
@@ -684,9 +801,16 @@ async def generate_iterate_stream(body: GenerateIterateRequest, request: Request
                     error=None if files else "未能生成有效的代码文件",
                 )
             except (ClientDisconnectedError, GenerationCancelledError):
+                stages["iteration"] = StageResult(status="cancelled", duration=round(time.time() - stage_start, 2))
+                step_messages.append({
+                    "stage": 0, "stageName": "iteration", "message": None,
+                    "status": "cancelled", "duration": stages["iteration"].duration,
+                })
                 try:
                     await update_session_with_ai_message(
-                        db, body.sessionId, files, "用户取消了生成", 0, stages, message_id=message_id,
+                        db, body.sessionId, files, "用户取消了生成", 0, stages,
+                        message_id=message_id, step_messages=step_messages,
+                        retry_message_id=retry_message_id,
                     )
                 except Exception:
                     pass
@@ -695,6 +819,10 @@ async def generate_iterate_stream(body: GenerateIterateRequest, request: Request
             except Exception as e:
                 duration = round(time.time() - stage_start, 2)
                 stages["iteration"] = StageResult(status="failed", duration=duration, error=str(e))
+                step_messages.append({
+                    "stage": 0, "stageName": "iteration", "message": None,
+                    "status": "failed", "duration": duration,
+                })
                 yield emit_stage_complete(
                     0, "iteration", "failed",
                     message=f"迭代生成失败: {str(e)}",
@@ -704,7 +832,8 @@ async def generate_iterate_stream(body: GenerateIterateRequest, request: Request
                 try:
                     await update_session_with_ai_message(
                         db, body.sessionId, files, f"迭代生成失败: {str(e)}", 0, stages,
-                        message_id=message_id,
+                        message_id=message_id, step_messages=step_messages,
+                        retry_message_id=retry_message_id,
                     )
                 except Exception as save_err:
                     logger.error(f"[SSE] 写入 session 失败: {str(save_err)}")
@@ -712,7 +841,9 @@ async def generate_iterate_stream(body: GenerateIterateRequest, request: Request
 
             try:
                 await update_session_with_ai_message(
-                    db, body.sessionId, files, ai_message, None, stages, message_id=message_id,
+                    db, body.sessionId, files, ai_message, None, stages,
+                    message_id=message_id, step_messages=step_messages,
+                    retry_message_id=retry_message_id,
                 )
             except Exception as e:
                 logger.error(f"[SSE] 写入 session 失败: {str(e)}")

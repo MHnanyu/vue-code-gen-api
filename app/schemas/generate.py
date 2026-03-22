@@ -40,6 +40,10 @@ class GenerateIterateRequest(BaseModel):
     prompt: str
     sessionId: Optional[str] = None
     files: List[GeneratedFile]
+    fromStep: Optional[int] = Field(
+        default=None,
+        description="重试时传入 0，表示回滚上次失败的迭代结果后重新执行"
+    )
 
 
 class GenerateResponseData(BaseModel):
