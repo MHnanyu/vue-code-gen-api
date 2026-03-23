@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     OPENCLAW_AGENT_ID: str = "main"
     OPENCLAW_MODEL: str = "openclaw"
     
-    MOCK_MODE: bool = True
+    MOCK_MODE: bool = False
     
     class Config:
         env_file = ".env"
