@@ -32,6 +32,7 @@ from app.utils.cancellation import (
 )
 from app.services.ai_factory import AIServiceFactory
 from app.services.glm4v_service import GLM4VService
+from app.services.minimax_service import summarize_with_minimax
 from app.config import settings
 from app.pipeline import (
     PipelineContext, StepExecutor, convert_api_files_to_generated,
@@ -179,6 +180,8 @@ def _initial_event_stream(ctx: PipelineContext, body: GenerateInitialRequest) ->
             if not has_failure:
                 ctx.failed_step = None
             summary_message = build_step_summary(ctx.step_messages) if not has_failure else ctx.ai_message
+            if not has_failure:
+                summary_message = await summarize_with_minimax(summary_message)
             try:
                 await update_session_with_ai_message(
                     ctx.db, ctx.session_id, ctx.files, summary_message, ctx.failed_step, ctx.stages,
@@ -338,6 +341,8 @@ def _iterate_event_stream(ctx: PipelineContext, body: GenerateIterateRequest, re
             except Exception as e:
                 logger.error(f"[SSE] 写入 session 失败: {str(e)}")
 
+            if len(ai_message) > 200:
+                ai_message = await summarize_with_minimax(ai_message)
             yield emit_done(ai_message, stages)
         finally:
             unregister_cancel(ctx.message_id)

@@ -16,9 +16,9 @@ class Settings(BaseSettings):
     GLM4V_API_URL: str = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
     GLM4V_MODEL: str = "glm-4.6v-flashx"
     
-    MINIMAX_API_KEY: Optional[str] = None
-    MINIMAX_API_URL: str = ""
-    MINIMAX_MODEL: str = ""
+    MINIMAX_API_KEY: Optional[str] = ""
+    MINIMAX_API_URL: str = "https://api.minimaxi.com/anthropic"
+    MINIMAX_MODEL: str = "MiniMax-M2.7"
     
     OPENCLAW_API_URL: str = "http://127.0.0.1:18789/v1/responses"
     OPENCLAW_TOKEN: Optional[str] = ""
