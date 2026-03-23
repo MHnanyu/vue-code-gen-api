@@ -129,7 +129,9 @@ Vue 3 Composition API (<script setup lang="ts">) + Element Plus + Tailwind CSS
 
 【特别注意】
 - content 字段中的代码必须正确转义：双引号用 \"，换行用 \n
-- 这是原型图，重点在于组件位置正确、布局合理、基础样式到位，不需要真实交互逻辑"""
+- 这是原型图，重点在于组件位置正确、布局合理、基础样式到位，不需要真实交互逻辑
+- 不要添加 isEdit 等控制编辑/禁用状态的变量，表单元素默认不禁用（不要设置 disabled 属性）
+- 使用了 Element Plus 图标组件（如 Plus、Edit、Delete、Search 等）时，必须在 script 中显式导入：import { Plus } from '@element-plus/icons-vue'"""
             user_message = prompt
         
         messages = [
