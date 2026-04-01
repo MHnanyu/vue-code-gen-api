@@ -21,7 +21,7 @@ class OpenclawService:
         ccui_prompt: str = ""
     ) -> dict:
         final_prompt = f"{ccui_prompt}\n\n{prompt}" if ccui_prompt else prompt
-        
+
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
