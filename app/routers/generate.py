@@ -20,6 +20,8 @@ from app.schemas.generate import (
 from app.utils.sse import (
     emit_stage_start, emit_stage_complete,
     emit_error, emit_cancelled, emit_done,
+    emit_agent_thinking, emit_tool_call_start,
+    emit_tool_call_result, emit_agent_done, emit_agent_cancelled,
 )
 from app.utils.output import (
     load_stage_output, save_stage_output, save_vue_files_from_json,
@@ -38,6 +40,8 @@ from app.pipeline import (
     PipelineContext, StepExecutor, convert_api_files_to_generated,
     _load_cached_steps_for_session, STAGE_NAME_MAP,
 )
+from app.agent.core import AgentCore
+from app.agent.tools import create_tool_registry
 
 logger = logging.getLogger(__name__)
 
@@ -564,3 +568,129 @@ async def analyze_image_file(file: UploadFile = File(...), prompt: Optional[str]
             status_code=500,
             detail={"code": ErrorCode.INTERNAL_ERROR, "message": f"图片文件分析失败: {str(e)}", "data": None},
         )
+
+
+# ──────────────────────────────────────────────
+# SSE stream: agent mode
+# ──────────────────────────────────────────────
+
+@router.post("/generate/agent/stream")
+async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
+    logger.info(
+        "[Agent SSE] 收到 Agent 生成请求 - sessionId: %s, componentLib: %s, prompt长度: %d",
+        body.sessionId, body.componentLib, len(body.prompt),
+    )
+
+    output_session_id = body.sessionId or f"no_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    message_id = str(uuid4())
+    output_dir = os.path.join("output", output_session_id, message_id)
+    os.makedirs(output_dir, exist_ok=True)
+
+    db = get_database() if body.sessionId else None
+
+    tool_registry = create_tool_registry(
+        component_lib=body.componentLib,
+        output_session_id=output_session_id,
+        message_id=message_id,
+        request=request,
+    )
+
+    agent = AgentCore(
+        tool_registry=tool_registry,
+        component_lib=body.componentLib,
+    )
+
+    async def event_stream():
+        register_cancel(message_id)
+        try:
+            user_prompt = body.prompt or ""
+
+            attachment_info = []
+            if body.attachments:
+                for att in body.attachments:
+                    if att.type == "image":
+                        local_path = None
+                        if att.url.startswith("/uploads/"):
+                            local_path = att.url[1:]
+                        if local_path and os.path.exists(local_path):
+                            import base64
+                            with open(local_path, "rb") as f:
+                                b64 = base64.b64encode(f.read()).decode("utf-8")
+                            attachment_info.append({
+                                "name": att.name,
+                                "type": "image",
+                                "base64": b64,
+                            })
+                        else:
+                            attachment_info.append({
+                                "name": att.name,
+                                "type": "image",
+                                "url": att.url,
+                            })
+                    elif att.type == "markdown":
+                        local_path = att.url[1:] if att.url.startswith("/") else att.url
+                        md_content = ""
+                        if os.path.exists(local_path):
+                            with open(local_path, "r", encoding="utf-8") as f:
+                                md_content = f.read()
+                        attachment_info.append({
+                            "name": att.name,
+                            "type": "markdown",
+                            "content": md_content,
+                        })
+
+            if attachment_info:
+                for ai in attachment_info:
+                    if ai["type"] == "image":
+                        user_prompt += f"\n\n[附件图片: {ai['name']} - Agent 可调用 analyze_image 工具分析此图片]"
+                    elif ai["type"] == "markdown" and ai.get("content"):
+                        user_prompt += f"\n\n[附件文档: {ai['name']}]\n{ai['content']}"
+
+            all_files: list[GeneratedFile] = []
+            step_messages: list[dict] = []
+
+            async for event in agent.run(
+                user_prompt=user_prompt,
+                attachments=attachment_info if attachment_info else None,
+                task_id=message_id,
+            ):
+                yield event
+
+            step_messages.append({
+                "stage": 0,
+                "stageName": "agent",
+                "message": "Agent 执行完成",
+                "status": "success",
+            })
+
+            if db and body.sessionId:
+                try:
+                    await update_session_with_ai_message(
+                        db=db,
+                        session_id=body.sessionId,
+                        files=all_files,
+                        ai_message="Agent 模式生成完成",
+                        failed_step=None,
+                        stages={"agent": StageResult(status="success")},
+                        message_id=message_id,
+                        step_messages=step_messages,
+                    )
+                except Exception as e:
+                    logger.error("[Agent SSE] 写入 session 失败: %s", str(e))
+
+        except Exception as e:
+            logger.error("[Agent SSE] Agent 执行异常: %s", str(e), exc_info=True)
+            yield emit_error(
+                code=ErrorCode.INTERNAL_ERROR,
+                message=f"Agent 执行异常: {str(e)}",
+                failed_step=None,
+                stages={},
+            )
+        finally:
+            unregister_cancel(message_id)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+    )

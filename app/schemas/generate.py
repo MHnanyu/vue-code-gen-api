@@ -132,3 +132,33 @@ class CancelledEvent(BaseModel):
     cancelledAtStep: Optional[int] = None
     stages: Dict[str, StageResult]
     timestamp: str
+
+
+class AgentThinkingEvent(BaseModel):
+    content: str
+    step: int
+    timestamp: str
+
+
+class ToolCallStartEvent(BaseModel):
+    toolName: str
+    arguments: str
+    step: int
+    timestamp: str
+
+
+class ToolCallResultEvent(BaseModel):
+    toolName: str
+    result: Optional[Any] = None
+    step: int
+    timestamp: str
+
+
+class AgentDoneEvent(BaseModel):
+    files: Optional[List[dict]] = None
+    timestamp: str
+
+
+class AgentCancelledEvent(BaseModel):
+    cancelledAtStep: int
+    timestamp: str
