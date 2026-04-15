@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     OPENCLAW_MODEL: str = "openclaw"
     
     MOCK_MODE: bool = False
+
+    AGENT_MAX_STEPS: int = 10
+    AGENT_ENABLE_REVIEW: bool = False
+    GLM5_AGENT_MODEL: Optional[str] = ""
     
     class Config:
         env_file = ".env"

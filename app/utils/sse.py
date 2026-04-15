@@ -119,3 +119,51 @@ def emit_done(
     if step_messages is not None:
         data["stepMessages"] = step_messages
     return _sse_event("done", data)
+
+
+def emit_agent_thinking(content: str, step: int) -> str:
+    return _sse_event("agent_thinking", {
+        "content": content,
+        "step": step,
+        "timestamp": _now_iso(),
+    })
+
+
+def emit_tool_call_start(
+    tool_name: str,
+    arguments: str,
+    step: int,
+) -> str:
+    return _sse_event("tool_call_start", {
+        "toolName": tool_name,
+        "arguments": arguments,
+        "step": step,
+        "timestamp": _now_iso(),
+    })
+
+
+def emit_tool_call_result(
+    tool_name: str,
+    result: dict,
+    step: int,
+) -> str:
+    return _sse_event("tool_call_result", {
+        "toolName": tool_name,
+        "result": result,
+        "step": step,
+        "timestamp": _now_iso(),
+    })
+
+
+def emit_agent_done(files: list | None = None) -> str:
+    data: dict[str, Any] = {"timestamp": _now_iso()}
+    if files:
+        data["files"] = files
+    return _sse_event("agent_done", data)
+
+
+def emit_agent_cancelled(cancelled_at_step: int) -> str:
+    return _sse_event("agent_cancelled", {
+        "cancelledAtStep": cancelled_at_step,
+        "timestamp": _now_iso(),
+    })
