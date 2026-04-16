@@ -6,11 +6,12 @@ SuperDesign 使用 Vercel AI SDK 的 streamText({ maxSteps: 10 })，
 """
 import json
 import logging
+import os
 from typing import Any, AsyncGenerator
 
 import httpx
 
-from app.agent.tools import ToolRegistry
+from app.agent.tools import ToolRegistry, _load_saved_vue_files
 from app.config import settings
 from app.utils.sse import (
     emit_agent_thinking,
@@ -54,7 +55,11 @@ class AgentCore:
         attachments: list[dict] | None = None,
         session_context: dict | None = None,
         task_id: str | None = None,
+        output_session_id: str | None = None,
+        message_id: str | None = None,
     ) -> AsyncGenerator[str, None]:
+        self._output_session_id = output_session_id
+        self._message_id = message_id
         messages = self._build_messages(user_prompt, session_context)
         tools = self.tool_registry.get_openai_tools()
 
@@ -234,7 +239,7 @@ class AgentCore:
             return None
 
     def _extract_files(self, messages: list[dict]) -> list[dict]:
-        files = []
+        seen: dict[str, dict] = {}
         for msg in messages:
             if msg.get("role") != "tool":
                 continue
@@ -244,7 +249,16 @@ class AgentCore:
                 if isinstance(result, dict) and "files" in result:
                     for f in result["files"]:
                         if isinstance(f, dict) and f.get("name"):
-                            files.append(f)
+                            seen[f["name"]] = f
             except (json.JSONDecodeError, TypeError):
                 continue
-        return files
+
+        if not seen:
+            return []
+
+        if self._output_session_id and self._message_id:
+            disk_files = _load_saved_vue_files(self._output_session_id, self._message_id)
+            if disk_files:
+                return disk_files
+
+        return list(seen.values())

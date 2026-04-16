@@ -90,6 +90,47 @@ def _build_file_summary(f: dict) -> dict:
     }
 
 
+def _load_saved_vue_files(output_session_id: str, message_id: str) -> list[dict] | None:
+    base_dir = os.path.join("output", output_session_id, message_id)
+    if not os.path.isdir(base_dir):
+        return None
+
+    candidates = []
+    try:
+        for entry in os.listdir(base_dir):
+            entry_path = os.path.join(base_dir, entry)
+            if os.path.isdir(entry_path) and entry.endswith("_vue"):
+                candidates.append(entry_path)
+    except OSError:
+        return None
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    latest_dir = candidates[0]
+
+    files = []
+    for filename in os.listdir(latest_dir):
+        if not filename.endswith(".vue"):
+            continue
+        filepath = os.path.join(latest_dir, filename)
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+            files.append({
+                "name": filename,
+                "path": f"/src/{filename}",
+                "type": "file",
+                "language": "vue",
+                "content": content,
+            })
+        except Exception as e:
+            logger.warning("读取 Vue 文件失败 %s: %s", filepath, e)
+
+    return files if files else None
+
+
 def create_tool_registry(
     component_lib: str,
     output_session_id: str,
@@ -98,9 +139,7 @@ def create_tool_registry(
 ) -> ToolRegistry:
     from app.services.glm4v_service import GLM4VService
     from app.services.requirement_service import RequirementService
-    from app.services.openclaw_service import OpenclawService
     from app.services.ai_factory import AIServiceFactory
-    from app.prompts import get_generation_prompt, get_optimization_prompt
     from app.utils.output import save_stage_output, save_vue_files_from_json
 
     registry = ToolRegistry()
@@ -171,16 +210,11 @@ def create_tool_registry(
         prompt = args["requirement"]
         existing_files = args.get("existing_files")
 
-        if component_lib.lower() == "ccui":
-            service = OpenclawService()
-            full_prompt = get_generation_prompt(component_lib, prompt)
-            result = await service.generate_vue_files(prompt=full_prompt)
-        else:
-            service = AIServiceFactory.get_service()
-            result = await service.generate_vue_files(
-                prompt=prompt,
-                existing_files=existing_files,
-            )
+        service = AIServiceFactory.get_service()
+        result = await service.generate_vue_files(
+            prompt=prompt,
+            existing_files=existing_files,
+        )
 
         files = result.get("files", [])
         message = result.get("message", "代码生成完成")
@@ -224,52 +258,7 @@ def create_tool_registry(
         required=True,
     ))
 
-    # ── 工具 4: UX 优化 ──
-    async def optimize_ux(args: dict) -> dict:
-        openclaw = OpenclawService()
-        opt_prompt = get_optimization_prompt(component_lib)
-        files_json = json.dumps(args["files"], ensure_ascii=False, indent=2)
-        full_prompt = f"{opt_prompt}\n\n待优化的文件：\n{files_json}\n"
-
-        result = await openclaw.generate_vue_files(prompt=full_prompt)
-
-        optimized_files = result.get("files", [])
-        save_stage_output(
-            "optimization", 3, result,
-            output_session_id, message_id, "json",
-        )
-        save_vue_files_from_json(
-            optimized_files, output_session_id, 3, "optimization", message_id,
-        )
-
-        file_summaries = [_build_file_summary(f) for f in optimized_files]
-
-        return {
-            "status": "success",
-            "file_count": len(optimized_files),
-            "files": file_summaries,
-            "message": result.get("message", "UX 优化完成"),
-        }
-
-    registry.register(ToolDefinition(
-        name="optimize_ux",
-        description="【必须步骤】对已生成的 Vue 代码进行 UX 样式和布局优化。通过 ccui-ux-guardian / enterprise-vue-refiner Skill 执行，Skill 内含 CSV 规范文件（颜色、字体、间距、阴影、圆角、组件规则等 Design Tokens），确保代码符合企业 UX 标准。代码生成后必须调用此工具。",
-        parameters={
-            "type": "object",
-            "properties": {
-                "files": {
-                    "type": "array",
-                    "description": "待优化的 Vue 文件列表（可用 generate_vue_code 返回的文件摘要，Agent 也会将文件路径传入）",
-                    "items": {"type": "object"},
-                },
-            },
-            "required": ["files"],
-        },
-        execute=optimize_ux,
-        required=True,
-    ))
-
-    # ── 工具 5: 查询 UX 规范 ──
+    # ── 工具 4: 查询 UX 规范 ──
     async def query_ux_spec(args: dict) -> dict:
         return await _query_ux_spec_files(
             component_lib,
@@ -280,7 +269,7 @@ def create_tool_registry(
 
     registry.register(ToolDefinition(
         name="query_ux_spec",
-        description="查询企业 UX 设计规范（Design Tokens），包括颜色、字体、间距、阴影、圆角、组件规则、布局规则等。数据来自 Skill 的 CSV 规范文件。生成代码前或优化时调用此工具，确保代码符合企业 UX 标准。",
+        description="查询企业 UX 设计规范（Design Tokens），包括颜色、字体、间距、阴影、圆角、组件规则、布局规则等。数据来自 Skill 的 CSV 规范文件。生成代码前调用此工具，确保代码符合企业 UX 标准。",
         parameters={
             "type": "object",
             "properties": {
@@ -303,7 +292,7 @@ def create_tool_registry(
         execute=query_ux_spec,
     ))
 
-    # ── 工具 6: 查询组件库文档 ──
+    # ── 工具 5: 查询组件库文档 ──
     async def search_component_doc(args: dict) -> dict:
         query = args["query"]
         lib = args.get("component_lib", component_lib)

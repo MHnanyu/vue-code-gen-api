@@ -1,0 +1,61 @@
+python scripts/test_agent.py --prompt "做一个Dashboard" --lib CcUI
+
+============================================================
+[测试] Agent Stream - componentLib=CcUI
+[测试] Prompt: 做一个Dashboard...
+============================================================
+
+[SSE] 连接建立，等待事件...
+
+[Step 0] 💭 Thinking: 好的！我来为您创建一个 Dashboard 页面。让我先进行需求标准化，同时查询相关的 UX 设计规范和组件文档。...
+[Step 0] 🔧 Tool Call: normalize_requirement({"requirement": "做一个Dashboard"})
+[Step 0] 🔧 Tool Call: query_ux_spec({"spec_type": "foundation", "max_rules": 20})
+[Step 0] 🔧 Tool Call: query_ux_spec({"spec_type": "layout", "max_rules": 10})
+[Step 0] 🔧 Tool Call: query_ux_spec({"spec_type": "component", "topic": "card", "max_rules": 10})
+         ✅ Result: {"requirement": "## 📋 页面概览\n\n- **页面名称**：核心业务数据看板 [※]\n- **页面类型**：Dashboard / 仪表盘 [✓]\n- **页面布局**：上下布局（顶部筛选区 + 核心指标卡片区 +
+         ✅ Result: {"spec_type": "foundation", "component_lib": "CcUI", "topic_filter": "(全部)", "total_rules": 14, "truncated": false, "rul
+         ✅ Result: {"spec_type": "layout", "component_lib": "CcUI", "topic_filter": "(全部)", "total_rules": 10, "truncated": false, "rules":
+         ✅ Result: {"spec_type": "component", "component_lib": "CcUI", "topic_filter": "card", "total_rules": 0, "truncated": false, "rules
+[Step 1] 💭 Thinking: 需求已标准化完成。现在让我查询一些关键组件的文档，确保代码生成时使用正确的 API。...
+[Step 1] 🔧 Tool Call: search_component_doc({"query": "统计卡片"})
+[Step 1] 🔧 Tool Call: search_component_doc({"query": "表格"})
+[Step 1] 🔧 Tool Call: search_component_doc({"query": "日期选择器"})
+         ✅ Result: {"component_lib": "CcUI", "query": "统计卡片", "found": false, "message": "未找到组件 '统计卡片' 的文档。可用的组件包括: affix, anchor, autocomp
+         ✅ Result: {"component_lib": "CcUI", "query": "表格", "found": false, "message": "未找到组件 '表格' 的文档。可用的组件包括: affix, anchor, autocomplete
+         ✅ Result: {"component_lib": "CcUI", "query": "日期选择器", "found": false, "message": "未找到组件 '日期选择器' 的文档。可用的组件包括: affix, anchor, autoco
+[Step 2] 🔧 Tool Call: search_component_doc({"query": "card"})
+[Step 2] 🔧 Tool Call: search_component_doc({"query": "date-picker"})
+[Step 2] 🔧 Tool Call: search_component_doc({"query": "timeline"})
+         ✅ Result: {"component_lib": "CcUI", "query": "card", "component_name": "card", "found": true, "summary": "## 组件: card\n\n基础用法\n\n使
+         ✅ Result: {"component_lib": "CcUI", "query": "date-picker", "component_name": "date-picker", "found": true, "summary": "## 组件: dat
+         ✅ Result: {"component_lib": "CcUI", "query": "timeline", "found": false, "message": "未找到组件 'timeline' 的文档。可用的组件包括: affix, anchor,
+[Step 3] 💭 Thinking: 现在我已经收集了足够的规范和组件信息。让我开始生成 Dashboard 代码。...
+[Step 3] 🔧 Tool Call: generate_vue_code({"requirement": "## 📋 页面概览\n\n- **页面名称**：核心业务数据看板\n- **页面类型**：Dashboard / 仪表盘\n- **页面布局**：上下布局（顶部筛选区)
+         ✅ Result: success, files=1
+[Step 4] 💭 Thinking: 代码已生成。现在进行 UX 优化。...
+[Step 4] 🔧 Tool Call: optimize_ux({"files": [{"name": "MainPage.vue", "path": "/src/MainPage.vue"}]})
+         ✅ Result: success, files=0
+[Step 5] 🔧 Tool Call: optimize_ux({"files": [{"id": "MainPage.vue", "name": "MainPage.vue", "path": "MainPage.vue"}]})
+         ✅ Result: success, files=1
+[Step 6] 💭 Thinking: UX 优化完成！Dashboard 页面已经生成并优化完毕。以下是页面的主要内容和结构：
+
+---
+
+## 📊 Dashboard 页面总览
+
+### 页面结构
+
+| 区域 | 内容 |
+|------|------|
+| **顶部工具栏** | 页面标题「工作台」+ 日期范围选择器 + 刷新按钮 ...
+
+============================================================
+[完成] Agent Done
+  文件数: 2
+  - MainPage.vue (141 行, 6326 bytes)
+  - MainPage.vue (319 行, 14701 bytes)
+
+============================================================
+[统计] 耗时: 475.5s, 事件总数: 32
+[统计] 事件分布: {"agent_thinking": 5, "tool_call_start": 13, "tool_call_result": 13, "agent_done": 1}
+============================================================

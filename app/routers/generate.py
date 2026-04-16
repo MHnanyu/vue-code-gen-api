@@ -102,6 +102,34 @@ import {{ ref }} from 'vue'
     )
 
 
+def _load_final_files_as_generated(output_dir: str) -> list[GeneratedFile]:
+    """Read final Vue files from disk (prefer optimization over generation)."""
+    from app.agent.tools import _load_saved_vue_files
+
+    parts = output_dir.replace("\\", "/").split("/")
+    if len(parts) >= 3:
+        session_id = parts[-2]
+        msg_id = parts[-1]
+    else:
+        return []
+
+    disk_files = _load_saved_vue_files(session_id, msg_id)
+    if not disk_files:
+        return []
+
+    result = []
+    for f in disk_files:
+        result.append(GeneratedFile(
+            id=str(uuid4()),
+            name=f.get("name", "unknown"),
+            path=f.get("path", ""),
+            type="file",
+            language="vue",
+            content=f.get("content", ""),
+        ))
+    return result
+
+
 async def _build_initial_context(
     body: GenerateInitialRequest, request: Request, db,
 ) -> PipelineContext:
@@ -653,8 +681,12 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
                 user_prompt=user_prompt,
                 attachments=attachment_info if attachment_info else None,
                 task_id=message_id,
+                output_session_id=output_session_id,
+                message_id=message_id,
             ):
                 yield event
+
+            all_files = _load_final_files_as_generated(output_dir)
 
             step_messages.append({
                 "stage": 0,
