@@ -37,6 +37,7 @@ class AIService(ABC):
     async def generate_vue_files(
         self,
         prompt: str,
-        existing_files: Optional[list[dict]] = None
+        existing_files: Optional[list[dict]] = None,
+        component_lib: str = "Element Plus"
     ) -> dict:
         pass

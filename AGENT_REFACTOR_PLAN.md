@@ -106,10 +106,10 @@
 ### 2.1 设计原则
 
 1. **渐进式改造**：新接口与旧 Pipeline 并存，逐步迁移
-2. **复用现有能力**：所有现有服务（GLM-5、GLM-4V、OpenClaw）封装为工具
+2. **复用现有能力**：现有服务（GLM-5、GLM-4V、RequirementService）封装为工具，不依赖 OpenClaw
 3. **SSE 事件兼容**：前端改动最小，新增 `thinking`、`tool_call` 事件类型
 4. **保留回退能力**：旧接口继续可用，出问题随时切回
-5. **核心质量步骤不可跳过**：需求标准化和 UX 优化是质量保障的底线，Agent 不能跳过。Agent 的自主性体现在**灵活组合**（如先分析图片再标准化、多次优化迭代），而非跳过质量步骤
+5. **核心质量步骤不可跳过**：需求标准化是质量保障的底线，Agent 不能跳过。Agent 的自主性体现在**灵活组合**（如先分析图片再标准化、查规范后一次生成到位），而非跳过质量步骤
 
 ---
 
@@ -143,20 +143,23 @@
                           │  │ · write_file      │  │
                           │  └───────────────────┘  │
                           │                         │
-                          │  ┌───────────────────┐  │
-                          │  │ System Prompt     │  │
-                          │  │ (动态组装)         │  │
-                          │  └───────────────────┘  │
+                           │  ┌───────────────────┐  │
+                           │  │ Tool Registry     │  │
+                           │  │ · analyze_image   │  │
+                           │  │ · normalize_req   │  │  ← 必须
+                           │  │ · query_ux_spec   │  │  ← 新增
+                           │  │ · generate_code   │  │  ← 必须
+                           │  │ · search_doc      │  │
+                           │  └───────────────────┘  │
                           └────────────┬────────────┘
                                        │ 调用
                           ┌────────────▼────────────┐
-                          │  现有服务（复用，不改）     │
-                          │  · GLM5Service           │
-                          │  · GLM4VService          │
-                          │  · OpenclawService       │
-                          │  · RequirementService    │
-                          │  · AIServiceFactory      │
-                          └─────────────────────────┘
+                           │  现有服务（复用，不改）     │
+                           │  · GLM5Service           │
+                           │  · GLM4VService          │
+                           │  · RequirementService    │
+                           │  · AIServiceFactory      │
+                           └─────────────────────────┘
 ```
 
 ### 3.2 Agent 核心流程
@@ -449,9 +452,7 @@ def create_tool_registry(
     """
     from app.services.glm4v_service import GLM4VService
     from app.services.requirement_service import RequirementService
-    from app.services.openclaw_service import OpenclawService
     from app.services.ai_factory import AIServiceFactory
-    from app.prompts import get_generation_prompt, get_optimization_prompt
     from app.utils.output import save_stage_output
 
     registry = ToolRegistry()
@@ -518,22 +519,17 @@ def create_tool_registry(
 
     # ── 工具 3: 生成 Vue 代码 ──
     # 对应 pipeline.py execute_generation_step
-    # 参考 SuperDesign 的 write-tool：写操作只返回元数据，不回传完整内容
+    # 统一走 GLM-5，不再依赖 OpenClaw
     async def generate_vue_code(args: dict) -> dict:
         """根据 UX 文档生成 Vue 3 组件代码"""
         prompt = args["requirement"]
         existing_files = args.get("existing_files")
 
-        if component_lib.lower() == "ccui":
-            service = OpenclawService()
-            full_prompt = get_generation_prompt(component_lib, prompt)
-            result = await service.generate_vue_files(prompt=full_prompt)
-        else:
-            service = AIServiceFactory.get_service()
-            result = await service.generate_vue_files(
-                prompt=prompt,
-                existing_files=existing_files,
-            )
+        service = AIServiceFactory.get_service()
+        result = await service.generate_vue_files(
+            prompt=prompt,
+            existing_files=existing_files,
+        )
 
         files = result.get("files", [])
         message = result.get("message", "代码生成完成")
@@ -545,7 +541,6 @@ def create_tool_registry(
         )
 
         # 只返回摘要，不回传完整代码（参考 SuperDesign write-tool 设计）
-        # Agent 不需要看到自己刚生成的代码全文，只需知道生成了什么
         file_summaries = []
         for f in files:
             content = f.get("content", "")
@@ -565,7 +560,7 @@ def create_tool_registry(
 
     registry.register(ToolDefinition(
         name="generate_vue_code",
-        description="根据 UX 规格文档生成 Vue 3 组件代码（SFC 格式）。生成后会自动保存。当需求足够清晰时应调用此工具。",
+        description="【必须步骤】根据 UX 规格文档生成 Vue 3 组件代码（SFC 格式）。生成后会自动保存。当需求足够清晰时应调用此工具。",
         parameters={
             "type": "object",
             "properties": {
@@ -582,62 +577,10 @@ def create_tool_registry(
             "required": ["requirement"],
         },
         execute=generate_vue_code,
+        required=True,
     ))
 
-    # ── 工具 4: UX 优化 ──
-    # 对应 pipeline.py execute_optimization_step
-    # 参考 SuperDesign 的 edit-tool：只返回元数据，不回传完整代码
-    async def optimize_ux(args: dict) -> dict:
-        """对已生成的 Vue 代码进行 UX 优化"""
-        openclaw = OpenclawService()
-        opt_prompt = get_optimization_prompt(component_lib)
-        files_json = json.dumps(args["files"], ensure_ascii=False, indent=2)
-        full_prompt = f"{opt_prompt}\n\n待优化的文件：\n{files_json}\n"
-
-        result = await openclaw.generate_vue_files(prompt=full_prompt)
-
-        optimized_files = result.get("files", [])
-        save_stage_output(
-            "optimization", 3, result,
-            output_session_id, message_id, "json",
-        )
-
-        # 只返回摘要，不回传完整代码
-        file_summaries = []
-        for f in optimized_files:
-            content = f.get("content", "")
-            file_summaries.append({
-                "name": f.get("name", "unknown"),
-                "path": f.get("path", ""),
-                "lines": content.count("\n") + 1 if content else 0,
-                "size_bytes": len(content.encode("utf-8")) if content else 0,
-            })
-
-        return {
-            "status": "success",
-            "file_count": len(optimized_files),
-            "files": file_summaries,
-            "message": result.get("message", "UX 优化完成"),
-        }
-
-    registry.register(ToolDefinition(
-        name="optimize_ux",
-        description="【必须步骤】对已生成的 Vue 代码进行 UX 样式和布局优化。通过 ccui-ux-guardian / enterprise-vue-refiner Skill 执行，Skill 内含 CSV 规范文件（颜色、字体、间距、阴影、圆角、组件规则等 Design Tokens），确保代码符合企业 UX 标准。代码生成后必须调用此工具。"
-        parameters={
-            "type": "object",
-            "properties": {
-                "files": {
-                    "type": "array",
-                    "description": "待优化的 Vue 文件列表",
-                    "items": {"type": "object"},
-                },
-            },
-            "required": ["files"],
-        },
-        execute=optimize_ux,
-    ))
-
-    # ── 工具 5: 查询 UX 规范 ──（新增能力）
+    # ── 工具 4: 查询 UX 规范 ──（新增能力）
     # Pipeline 中没有，Agent 模式新增
     # 数据源：Skill 目录下的 CSV 规范文件
     #   - CcUI: ccui-ux-guardian/data/{foundation,component,global-layout}-rules.csv
@@ -675,7 +618,7 @@ def create_tool_registry(
         execute=query_ux_spec,
     ))
 
-    # ── 工具 6: 查询组件库文档 ──（新增能力）
+    # ── 工具 5: 查询组件库文档 ──（新增能力）
     # 数据源：Skill 目录下的组件 MD 文档
     #   - CcUI: vue3-ccui-generator/references/{component}.md（60+ 组件文档）
     #   - ElementUI: 内网文档 API 或 Element Plus 官方文档
@@ -933,23 +876,21 @@ def build_agent_system_prompt(
    - 需求模糊时：标准化过程会自动补全合理推导（标注※）
    - 需求已详细时：标准化过程会去噪、结构化、统一格式
    - 无论需求长短，标准化都能产出更清晰的描述，为后续生成提供质量保障
-3. **查询规范和文档**（可选，按需）：
-   - 调用 query_ux_spec 查询企业 UX 规范（Design Tokens），在生成时就遵循规范
-   - 调用 search_component_doc 查询组件用法，确保使用正确的组件 API
-4. **代码生成**（必须）：根据标准化后的 UX 文档生成 Vue 3 代码
-   - 如果生成结果有问题，可以重新调用 generate_vue_code 生成
-5. **UX 优化**（必须）：调用 optimize_ux 对代码进行样式优化
-   - 优化 Skill 会根据 CSV 规范文件自动修正不符合企业 UX 标准的样式
-   - 如果优化后仍有问题，可以多次调用 optimize_ux 迭代优化
-6. **自审**（可选）：审查生成结果，如有遗漏则补充修改
+3. **查询规范和文档**（推荐）：
+   - 调用 query_ux_spec 查询企业 UX 规范（Design Tokens），将规范要求整合进生成 prompt
+   - 调用 search_component_doc 查询组件用法（仅 CcUI 可用），确保使用正确的组件 API
+   - 查到的规范和文档信息应直接写入 generate_vue_code 的 requirement 参数中
+4. **代码生成**（必须）：根据标准化后的 UX 文档（含规范要求）生成 Vue 3 代码
+   - 将查到的规范规则和组件文档摘要整合到 requirement 参数中
+   - 如果生成结果有问题，可以分析原因后重新调用 generate_vue_code
 
 ## Agent 的自主性
 你的自主性体现在以下方面（而非跳过步骤）：
-- ✅ 灵活组合：先分析图片再标准化，或标准化后查询组件文档再生成
-- ✅ 多次执行：对同一个工具可以多次调用（如重新生成、多次优化）
-- ✅ 动态插入：在标准化和生成之间插入文档查询、规范查询等辅助步骤
-- ✅ 自主修复：发现生成结果有问题时，自主决定重试策略
-- ❌ 不可跳过：需求标准化和 UX 优化是质量底线，不能跳过
+- 灵活组合：先分析图片再标准化，或标准化后查询组件文档再生成
+- 多次执行：对同一个工具可以多次调用（如重新生成）
+- 动态插入：在标准化和生成之间插入文档查询、规范查询等辅助步骤
+- 自主修复：发现生成结果有问题时，自主决定重试策略
+- 不可跳过：需求标准化是质量底线，不能跳过
 
 ## 代码生成规范
 - Vue 3 Composition API（`<script setup lang="ts">`）
@@ -958,23 +899,16 @@ def build_agent_system_prompt(
 - 尽量只生成 MainPage.vue 一个文件（除非页面复杂需要拆分）
 - 不要生成 main.ts、App.vue、index.html 等配置文件
 - 使用了 Element Plus 图标时必须在 script 中显式导入
+- 严格遵守查到的 UX 规范（颜色、字体、间距、阴影、圆角等 Design Tokens）
 
 ## 输出格式
 - 代码生成结果为 JSON 格式：{{"files": [...], "message": "说明"}}
 - 每个文件包含 id、name、path、type、language、content 字段
 - content 字段中的代码必须正确转义
 
-## 与旧 Pipeline 的区别
-- 你不是固定执行 4 步，而是自主组合工具、灵活调整执行顺序
-- 你可以多次调用同一个工具（比如先生成、再修改、再优化）
-- 你可以在任何阶段查询组件库文档和 UX 规范
-- 需求标准化和 UX 优化是必须步骤，但你可以在中间插入其他辅助步骤
-- 你可以根据生成结果质量决定是否需要重新生成或多次优化
-
 ## 注意事项
 - 如果 generate_vue_code 返回的代码有错误，尝试分析原因并重新生成
-- 如果 optimize_ux 返回空文件，尝试用不同的参数再次调用，或直接返回生成结果并说明
-- 生成代码前可以先调用 query_ux_spec 了解企业 UX 规范，减少后续优化的工作量
+- 生成代码前调用 query_ux_spec 了解企业 UX 规范，将规范直接写入 requirement 参数，确保一次生成即符合标准
 - 始终以用户原始需求为最终标准，不要偏离用户意图
 """
 
@@ -1003,7 +937,8 @@ Review Agent：代码生成后的自审环节。
 """
 import json
 import logging
-from openai import AsyncOpenAI
+
+import httpx
 
 from app.config import settings
 from app.agent.prompts import build_review_prompt
@@ -1020,10 +955,11 @@ async def review_generated_code(
     审查生成的 Vue 代码。
     返回: {"pass": bool, "issues": list, "severity": str}
     """
-    client = AsyncOpenAI(
-        api_key=settings.GLM5_API_KEY,
-        base_url=settings.GLM5_API_URL.replace("/chat/completions", ""),
-    )
+    api_url = settings.GLM5_API_URL
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {settings.GLM5_API_KEY}",
+    }
 
     files_summary = "\n".join(
         f"文件: {f.get('name')}\n```\n{f.get('content', '')[:2000]}\n```"
@@ -1036,7 +972,7 @@ async def review_generated_code(
     ]
 
     response = await client.chat.completions.create(
-        model=settings.GLM5_MODEL,
+        model=settings.GLM5_AGENT_MODEL or settings.GLM5_MODEL,
         messages=messages,
         temperature=0.1,
         response_format={"type": "json_object"},
@@ -1220,7 +1156,7 @@ GLM5_AGENT_MODEL: Optional[str] = ""  # Agent 专用模型（留空则使用 GLM
 | `error` | 通用 | 错误 | 保留 |
 | `cancelled` | 通用 | 取消 | 保留 |
 
-**前端影响**：旧接口事件格式完全不变。新接口新增 4 个事件类型，前端需监听处理。
+**前端影响**：旧接口事件格式完全不变。新接口新增 5 个事件类型，前端需监听处理。
 
 ---
 
@@ -1236,9 +1172,8 @@ GLM5_AGENT_MODEL: Optional[str] = ""  # Agent 专用模型（留空则使用 GLM
 | 2 | Step 1: 需求标准化（固定执行） | Agent 将图片分析结果整合进需求 → 调用 `normalize_requirement` 标准化 |
 | 3 | Step 2: 代码生成（固定执行） | Agent 调用 `query_ux_spec("foundation")` 查询颜色/间距规范 |
 | 4 | — | Agent 不确定 Form 组件用法 → 调用 `search_component_doc("Form")` 查询组件文档 |
-| 5 | Step 2: 代码生成 | Agent 调用 `generate_vue_code` 生成代码（已参考规范和组件文档） |
-| 6 | Step 3: UX 优化（固定执行） | Agent 调用 `optimize_ux` 按 CSV 规范精修 |
-| 7 | 固定完成 | Agent 审查结果满意 → 结束 |
+| 5 | Step 2: 代码生成 | Agent 将规范和文档信息写入 requirement → 调用 `generate_vue_code` 一次生成合规代码 |
+| 6 | 固定完成 | Agent 审查结果满意 → 结束 |
 
 **场景：用户说"做一个登录页"**
 
@@ -1246,25 +1181,25 @@ GLM5_AGENT_MODEL: Optional[str] = ""  # Agent 专用模型（留空则使用 GLM
 |------|-------------|------------|
 | 1 | Step 0: 无附件，直接传 prompt | Agent 判断无图片，直接进入标准化 |
 | 2 | Step 1: 需求标准化（固定执行） | Agent 调用 `normalize_requirement` → 得到结构化登录页文档（字段、组件、交互） |
-| 3 | Step 2: 代码生成（固定执行） | Agent 调用 `generate_vue_code` 生成代码 |
-| 4 | Step 3: UX 优化（固定执行） | Agent 调用 `optimize_ux` 确保样式符合规范 |
-| 5 | 固定完成 | 结束（4 步 vs 旧 4 步，但中间可灵活插入规范查询） |
+| 3 | Step 2: 代码生成（固定执行） | Agent 调用 `generate_vue_code` 生成代码（已包含规范要求） |
+| 4 | 固定完成 | 结束（3 步 vs 旧 4 步，省去了 UX 优化步骤） |
 
-> **关键区别**：Agent 模式不会跳过标准化和 UX 优化，但可以动态插入 `query_ux_spec`、`search_component_doc` 等辅助步骤，并在生成/优化结果不理想时自主重试。
+> **关键区别**：Agent 模式在生成前通过 `query_ux_spec` 和 `search_component_doc` 获取规范和文档信息，将规范直接注入生成 prompt，一次生成即符合标准，无需额外的 UX 优化步骤。
 
 ### 6.2 能力对比
 
 | 能力 | 旧 Pipeline | Agent 模式 |
 |------|-------------|------------|
 | 固定 4 步执行 | 是 | 否（灵活组合） |
-| 跳过核心质量步骤 | 不支持 | **不支持**（标准化和 UX 优化不可跳过） |
-| 重复调用同一步骤 | 不支持 | 支持（如多次生成、多次优化） |
+| 跳过核心质量步骤 | 不支持 | **不支持**（标准化不可跳过） |
+| 重复调用同一步骤 | 不支持 | 支持（如多次生成） |
 | 动态查询组件库文档 | 不支持 | 支持（search_component_doc，读取 Skill references/ MD 文件） |
 | 动态查询 UX 规范 | 不支持 | 支持（query_ux_spec，读取 Skill CSV 规范文件） |
 | 代码自审 + 自动修复 | 不支持 | 支持（Review Agent） |
 | 灵活处理异常 | from_step 断点重试 | Agent 自主决定重试策略 |
 | SSE 实时进度 | stage 事件 | thinking + tool_call 事件 |
 | 前端兼容性 | 完全兼容 | 需监听新事件类型 |
+| OpenClaw 依赖 | CcUI 生成+优化 | **已移除**，全部走 GLM-5 |
 
 ---
 
@@ -1286,35 +1221,31 @@ GLM5_AGENT_MODEL: Optional[str] = ""  # Agent 专用模型（留空则使用 GLM
 
 ## 8. Skill 调用链路
 
-Agent 模式下，多个工具通过 OpenClaw 与 Skill 交互。以下是完整的调用链路和数据源说明：
+Agent 模式下，工具直接读取 Skill 数据文件（CSV/MD），不经过 OpenClaw Agent 中间层。Agent 完全自主决策。
 
 ### 8.1 调用链路图
 
 ```
-Agent (LLM + Tool Calling)
+Agent (GLM-5 + Tool Calling)
   │
   ├── normalize_requirement
   │     └── RequirementService → GLM-5 → requirement_template.md → 结构化 UX 文档
   │
-  ├── query_ux_spec  ← 新增工具
-  │     └── 直接读取 Skill CSV 文件（不经过 OpenClaw）
+  ├── query_ux_spec
+  │     └── 直接读取 Skill CSV 文件
   │           ├── ccui-ux-guardian/data/foundation-rules.csv    (FDN: 颜色/字体/间距/阴影/圆角)
   │           ├── ccui-ux-guardian/data/component-rules.csv     (CMP: 表格/表单/按钮等组件规则)
   │           ├── ccui-ux-guardian/data/global-layout-rules.csv (LAY: 安全边距/页面背景/导航)
   │           └── enterprise-ui-ux-refiner/data/tailwind-token-mapping.csv (CSS 变量→Tailwind 映射)
   │
   ├── search_component_doc
-  │     └── 直接读取 Skill MD 文件（CcUI）/ 内网 API（ElementUI）
+  │     └── 直接读取 Skill MD 文件（CcUI）
   │           └── vue3-ccui-generator/references/*.md  (60+ 组件文档：table, form, input, select...)
   │
-  ├── generate_vue_code
-  │     ├── CcUI → OpenclawService → OpenClaw Agent → vue3-ccui-generator Skill
-  │     └── ElementUI/aui → AIServiceFactory → GLM-5 直接生成
-  │
-  └── optimize_ux
-        └── OpenclawService → OpenClaw Agent
-              ├── CcUI → ccui-ux-guardian Skill（读取 CSV 规范修正样式）
-              └── ElementUI → enterprise-vue-refiner Skill（读取 CSV 规范修正样式）
+  └── generate_vue_code
+        └── AIServiceFactory → GLM-5 直接生成（不依赖 OpenClaw）
+              Agent 在调用前已通过 query_ux_spec / search_component_doc 获取规范和文档，
+              将规范要求写入 requirement 参数，确保一次生成即符合标准
 ```
 
 ### 8.2 数据源说明
@@ -1330,10 +1261,11 @@ Agent (LLM + Tool Calling)
 
 ### 8.3 设计要点
 
+- **不依赖 OpenClaw**：所有工具直接在 Python 层执行，Agent 完全自主，去掉 OpenClaw 中间层
 - **`query_ux_spec` 直接读 CSV**：不走 OpenClaw Agent，直接在 Python 层读取 CSV 文件，减少一次 LLM 调用，速度更快
 - **`search_component_doc` 直接读 MD**：CcUI 组件文档同样直接读取本地 MD 文件，不走 OpenClaw
-- **`generate_vue_code` 和 `optimize_ux` 走 OpenClaw**：需要 Skill 的完整推理能力（加载 CSV、逐项修正），必须通过 OpenClaw Agent 调用
-- **Agent 可提前感知规范**：通过 `query_ux_spec` 在生成前就了解规范，让 `generate_vue_code` 产出更合规的代码，减轻 `optimize_ux` 的修正压力
+- **`generate_vue_code` 统一走 GLM-5**：不区分 CcUI/ElementUI，全部通过 AIServiceFactory 调用 GLM-5 直接生成
+- **Agent 可提前感知规范**：通过 `query_ux_spec` 在生成前就了解规范，将规范写入 requirement 参数，一次生成即符合标准，无需后续优化步骤
 
 ---
 
@@ -1343,31 +1275,38 @@ Agent (LLM + Tool Calling)
 
 ```
 Week 1
-├── Day 1-2: 创建 app/agent/ 目录，实现 core.py + tools.py
+├── Day 1-2: 创建 app/agent/ 目录，实现 core.py + tools.py ✅
 │   ├── Agent Loop（while + tool calling）
-│   └── 6 个工具定义（封装现有服务 + query_ux_spec + search_component_doc）
+│   ├── 5 个工具定义（analyze_image, normalize_requirement, generate_vue_code, query_ux_spec, search_component_doc）
+│   └── generate_vue_code 统一走 GLM-5，不依赖 OpenClaw
 │
-├── Day 3-4: 实现 prompts.py + SSE 事件扩展
-│   ├── Agent System Prompt
-│   └── sse.py 新增 4 个事件类型
+├── Day 3-4: 实现 prompts.py + SSE 事件扩展 + Agent 路由 ✅
+│   ├── Agent System Prompt（4 步流程：标准化→查规范→查文档→生成）
+│   ├── sse.py 新增 5 个事件类型
+│   ├── 新增 POST /api/generate/agent/stream 路由
+│   └── schemas/generate.py 新增 Agent 事件 Schema
 │
-├── Day 5: 新增 /api/generate/agent/stream 路由
-│   └── 与旧接口并行，前端可切换
-│
+├── Day 5: 联调测试 + Bug 修复 ✅
+│   ├── 编写 scripts/test_agent.py 联调测试脚本
+│   ├── 修复 optimize_ux 收不到代码内容的问题 → 确认移除 optimize_ux
+│   ├── 修复 _extract_files 重复文件问题（按文件名去重+从磁盘读取）
+│   ├── 删除 OpenClaw 依赖（generate_vue_code 统一走 GLM-5）
+│   └── 修复 ElementUI 下 search_component_doc 无效调用的问题
+
 Week 2
-├── Day 1-2: 联调测试
-│   ├── 纯文本需求（简单场景）
-│   ├── 图片 + 文本需求（复杂场景）
-│   └── 迭代修改场景
+├── Day 1-2: 深度联调测试
+│   ├── CcUI 组件库场景测试
+│   ├── ElementUI 组件库场景测试
+│   └── 图片+文本混合需求场景测试
 │
-├── Day 3-4: 接入 Skill 数据源
-│   ├── 实现 query_ux_spec 的 CSV 文件读取
-│   └── 实现 search_component_doc 的 CcUI MD 文件读取
+├── Day 3-4: 前端对接 + 边界 case 处理
+│   ├── 前端监听新 SSE 事件类型
+│   ├── 工具执行超时处理
+│   └── LLM 不调用工具直接回复的处理
 │
-└── Day 5: Bug 修复 + 边界 case 处理
-    ├── 工具执行超时
-    ├── LLM 不调用工具直接回复
-    └── 连续调用同一工具的防护
+└── Day 5: 稳定性验证 + 旧 Pipeline 对比测试
+    ├── Agent 结果质量 vs 旧 Pipeline 结果质量
+    └── 性能对比（耗时、token 消耗）
 ```
 
 ### Phase 2：增强 Agent（2-3 周）
@@ -1396,7 +1335,7 @@ Week 2
 | 风险 | 说明 | 应对 |
 |------|------|------|
 | LLM 不按预期调用工具 | GLM-5 的 Tool Calling 能力未经充分验证 | 1. 提前测试 Tool Calling 稳定性 2. System Prompt 中明确指引调用时机 |
-| Token 消耗增加 | Agent Loop 多轮对话，tool result 作为 tool message 回传 LLM 全部参与计费 | 1. 设置 maxSteps 上限（10） 2. **generate_vue_code / optimize_ux 只返回元数据摘要**（文件名+行数），不回传完整代码（参考 SuperDesign write-tool 设计） 3. **query_ux_spec 默认最多 20 条规则**，有 max_rules 参数可控 4. **search_component_doc 返回结构化摘要**（概述+核心属性），不回传完整 MD 原文 5. **Agent Loop 全局安全网**：单次 tool result 超 4000 字符自动截断 |
+| Token 消耗增加 | Agent Loop 多轮对话，tool result 作为 tool message 回传 LLM 全部参与计费 | 1. 设置 maxSteps 上限（10） 2. **generate_vue_code 只返回元数据摘要**（文件名+行数），不回传完整代码（参考 SuperDesign write-tool 设计） 3. **query_ux_spec 默认最多 20 条规则**，有 max_rules 参数可控 4. **search_component_doc 返回结构化摘要**（概述+核心属性），不回传完整 MD 原文 5. **Agent Loop 全局安全网**：单次 tool result 超 4000 字符自动截断 |
 | 执行时间变长 | Agent 需要多轮 LLM 调用 | 1. SSE 实时推送进度，用户体验不变 2. query_ux_spec/search_component_doc 直接读文件（毫秒级），不增加耗时 |
 | 前端改动 | 需要监听新事件类型 | 1. 旧接口继续可用 2. 新接口渐进式切换 |
 | 旧接口废弃 | 团队习惯旧 Pipeline | 1. 两套并行运行 2. 验证 Agent 稳定后再逐步迁移 |
@@ -1411,7 +1350,7 @@ Week 2
 openai>=1.0.0    # OpenAI Python SDK（用于 Tool Calling + 流式）
 ```
 
-仅新增一个依赖。`openai` SDK 原生支持 Tool Calling，智谱 GLM-5 API 兼容 OpenAI 协议，无需其他 SDK。
+仅新增一个依赖。`openai` SDK 原生支持 Tool Calling，智谱 GLM-5 API 兼容 OpenAI 协议，无需其他 SDK。Agent 模式不再依赖 OpenClaw。
 
 ### 移除依赖
 

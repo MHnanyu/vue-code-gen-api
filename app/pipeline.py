@@ -340,7 +340,7 @@ class StepExecutor:
             else:
                 ai_service = AIServiceFactory.get_service()
                 result = await run_with_cancel_check(
-                    ai_service.generate_vue_files(prompt=ctx.requirement_doc, existing_files=None),
+                    ai_service.generate_vue_files(prompt=ctx.requirement_doc, existing_files=None, component_lib=ctx.component_lib),
                     ctx.request, task_id=ctx.message_id,
                 )
 

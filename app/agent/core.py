@@ -11,7 +11,7 @@ from typing import Any, AsyncGenerator
 
 import httpx
 
-from app.agent.tools import ToolRegistry, _load_saved_vue_files
+from app.agent.tools import ToolRegistry, _load_saved_vue_files, _build_file_summary
 from app.config import settings
 from app.utils.sse import (
     emit_agent_thinking,
@@ -24,7 +24,7 @@ from app.utils.cancellation import is_cancelled
 
 logger = logging.getLogger(__name__)
 
-MAX_STEPS = 10
+DEFAULT_MAX_STEPS = 10
 TOOL_RESULT_MAX_CHARS = 4000
 
 
@@ -34,9 +34,11 @@ class AgentCore:
         self,
         tool_registry: ToolRegistry,
         component_lib: str = "ElementUI",
+        max_steps: int | None = None,
     ):
         self.tool_registry = tool_registry
         self.component_lib = component_lib
+        self.max_steps = max_steps or settings.AGENT_MAX_STEPS
         self._required_tools = tool_registry.get_required_tool_names()
         self._called_required: set[str] = set()
 
@@ -72,7 +74,7 @@ class AgentCore:
             )
             return
 
-        for step in range(MAX_STEPS):
+        for step in range(self.max_steps):
             if task_id and is_cancelled(task_id):
                 from app.utils.sse import emit_agent_cancelled
                 yield emit_agent_cancelled(step)
@@ -164,12 +166,23 @@ class AgentCore:
                         step,
                     )
 
-        logger.warning("Agent 达到最大步数限制 (%d)", MAX_STEPS)
         missing = set(self._required_tools) - self._called_required
         if missing:
-            logger.warning("Agent 未调用必须工具: %s", missing)
-
-        yield emit_agent_done(files=self._extract_files(messages))
+            missing_names = ", ".join(sorted(missing))
+            logger.warning("Agent 达到最大步数 (%d)，未调用必须工具: %s", self.max_steps, missing_names)
+            files = self._extract_files(messages)
+            if files:
+                yield emit_agent_done(files=files)
+            else:
+                yield emit_error(
+                    code=500,
+                    message=f"Agent 达到最大步数限制 ({self.max_steps})，且未完成必须步骤: {missing_names}",
+                    failed_step=self.max_steps,
+                    stages={},
+                )
+        else:
+            logger.warning("Agent 达到最大步数限制 (%d)，已调用所有必须工具", self.max_steps)
+            yield emit_agent_done(files=self._extract_files(messages))
 
     def _build_messages(self, user_prompt: str, context: dict | None) -> list[dict]:
         system_prompt = self._build_system_prompt()
@@ -239,6 +252,11 @@ class AgentCore:
             return None
 
     def _extract_files(self, messages: list[dict]) -> list[dict]:
+        if self._output_session_id and self._message_id:
+            disk_files = _load_saved_vue_files(self._output_session_id, self._message_id)
+            if disk_files:
+                return disk_files
+
         seen: dict[str, dict] = {}
         for msg in messages:
             if msg.get("role") != "tool":
@@ -249,16 +267,11 @@ class AgentCore:
                 if isinstance(result, dict) and "files" in result:
                     for f in result["files"]:
                         if isinstance(f, dict) and f.get("name"):
-                            seen[f["name"]] = f
+                            if f.get("content"):
+                                seen[f["name"]] = _build_file_summary(f)
+                            elif f.get("lines") is not None:
+                                seen[f["name"]] = f
             except (json.JSONDecodeError, TypeError):
                 continue
-
-        if not seen:
-            return []
-
-        if self._output_session_id and self._message_id:
-            disk_files = _load_saved_vue_files(self._output_session_id, self._message_id)
-            if disk_files:
-                return disk_files
 
         return list(seen.values())

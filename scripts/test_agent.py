@@ -4,7 +4,7 @@ Agent 模式联调测试脚本。
 用法:
     python scripts/test_agent.py                    # 纯文本需求（简单场景）
     python scripts/test_agent.py --prompt "做一个登录页" --lib ElementUI
-    python scripts/test_agent.py --prompt "做一个Dashboard" --lib CcUI --image test.png
+    python scripts/test_agent.py --prompt "做一个Dashboard" --lib CcUI --image uploads/test.jpg
     python scripts/test_agent.py --mock              # Mock 模式测试 SSE 事件格式
 """
 import argparse
@@ -31,21 +31,31 @@ async def test_agent_stream(prompt: str, component_lib: str = "ElementUI", image
         "componentLib": component_lib,
     }
 
-    if image_path and os.path.exists(image_path):
-        import base64
-        with open(image_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("utf-8")
-        payload["attachments"] = [{
-            "id": "test-img-001",
-            "url": f"data:image/png;base64,{b64[:50]}...",
-            "name": os.path.basename(image_path),
-            "type": "image",
-            "size": os.path.getsize(image_path),
-        }]
-        print(f"[测试] 附件: {image_path}")
+    if image_path:
+        if os.path.exists(image_path):
+            print(f"[测试] 上传图片: {image_path}")
+            import httpx
+            async with httpx.AsyncClient(timeout=30.0) as upload_client:
+                with open(image_path, "rb") as f:
+                    resp = await upload_client.post(
+                        f"{BASE_URL}/api/upload",
+                        files={"files": (os.path.basename(image_path), f)},
+                    )
+                if resp.status_code != 200:
+                    print(f"[错误] 图片上传失败: HTTP {resp.status_code} {resp.text}")
+                    return
+                upload_data = resp.json().get("data", {})
+                uploaded_files = upload_data.get("files", [])
+                if not uploaded_files:
+                    print("[错误] 上传返回无文件信息")
+                    return
+                payload["attachments"] = [uploaded_files[0]]
+                print(f"[测试] 上传成功: {uploaded_files[0].get('url')}")
+        else:
+            print(f"[警告] 图片文件不存在: {image_path}，将跳过图片上传")
 
     import httpx
-    async with httpx.AsyncClient(timeout=300.0) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=1200.0, write=30.0, pool=30.0)) as client:
         start_time = time.time()
         event_counts: dict[str, int] = {}
         total_events = 0
@@ -84,7 +94,10 @@ async def test_agent_stream(prompt: str, component_lib: str = "ElementUI", image
                         if current_event_type == "agent_thinking":
                             content = data.get("content", "") if isinstance(data, dict) else str(data)
                             step = data.get("step", "?") if isinstance(data, dict) else "?"
-                            print(f"[Step {step}] 💭 Thinking: {content[:150]}...")
+                            if len(content) > 200:
+                                print(f"[Step {step}] 💭 Thinking: {content[:200]}...\n         (已截断，共 {len(content)} 字符)")
+                            else:
+                                print(f"[Step {step}] 💭 Thinking: {content}")
                         elif current_event_type == "tool_call_start":
                             tool = data.get("toolName", "?") if isinstance(data, dict) else "?"
                             step = data.get("step", "?") if isinstance(data, dict) else "?"
@@ -107,9 +120,19 @@ async def test_agent_stream(prompt: str, component_lib: str = "ElementUI", image
                                 elif file_count != "N/A":
                                     print(f"         ✅ Result: {status}, files={file_count}")
                                 else:
-                                    print(f"         ✅ Result: {json.dumps(result, ensure_ascii=False)[:120]}")
+                                    result_str = json.dumps(result, ensure_ascii=False)
+                                    if len(result_str) > 200:
+                                        print(f"         ✅ Result: {result_str[:200]}...")
+                                        print(f"                   (已截断，共 {len(result_str)} 字符)")
+                                    else:
+                                        print(f"         ✅ Result: {result_str}")
                             else:
-                                print(f"         ✅ Result: {str(result)[:120]}")
+                                result_str = str(result)
+                                if len(result_str) > 200:
+                                    print(f"         ✅ Result: {result_str[:200]}...")
+                                    print(f"                   (已截断，共 {len(result_str)} 字符)")
+                                else:
+                                    print(f"         ✅ Result: {result_str}")
                         elif current_event_type == "agent_done":
                             files = data.get("files", []) if isinstance(data, dict) else []
                             print(f"\n{'='*60}")

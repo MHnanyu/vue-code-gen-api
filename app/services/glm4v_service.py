@@ -37,18 +37,13 @@ class GLM4VService:
         are_base64: bool = False
     ) -> str:
         content = []
-        
+
         for source in image_sources:
-            if are_base64:
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": source}
-                })
-            else:
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": source}
-                })
+            url = self._format_image_url(source, are_base64)
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": url}
+            })
         
         content.append({"type": "text", "text": prompt})
         
@@ -105,6 +100,14 @@ class GLM4VService:
             "success": True
         }
     
+    @staticmethod
+    def _format_image_url(image_source: str, is_base64: bool) -> str:
+        if is_base64:
+            if image_source.startswith("data:"):
+                return image_source
+            return f"data:image/png;base64,{image_source}"
+        return image_source
+
     def _build_image_message(
         self,
         image_source: str,
@@ -112,20 +115,12 @@ class GLM4VService:
         is_base64: bool
     ) -> List[Dict]:
         content = []
-        
-        if is_base64:
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": image_source}
-            })
-        else:
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": image_source}
-            })
-        
+        url = self._format_image_url(image_source, is_base64)
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": url}
+        })
         content.append({"type": "text", "text": prompt})
-        
         return [{"role": "user", "content": content}]
     
     async def _chat_completion(

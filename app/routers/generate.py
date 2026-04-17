@@ -286,7 +286,7 @@ def _iterate_event_stream(ctx: PipelineContext, body: GenerateIterateRequest, re
                 ai_service = AIServiceFactory.get_service()
                 existing_files = restored_files if restored_files is not None else [f.model_dump() for f in body.files]
                 result = await run_with_cancel_check(
-                    ai_service.generate_vue_files(prompt=body.prompt, existing_files=existing_files),
+                    ai_service.generate_vue_files(prompt=body.prompt, existing_files=existing_files, component_lib=ctx.component_lib),
                     ctx.request, task_id=ctx.message_id,
                 )
 
@@ -616,11 +616,53 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
 
     db = get_database() if body.sessionId else None
 
+    import base64 as _base64
+
+    attachment_info = []
+    user_prompt = body.prompt or ""
+
+    if body.attachments:
+        for att in body.attachments:
+            if att.type == "image":
+                local_path = None
+                if att.url.startswith("/uploads/"):
+                    local_path = att.url[1:]
+                if local_path and os.path.exists(local_path):
+                    with open(local_path, "rb") as f:
+                        b64 = _base64.b64encode(f.read()).decode("utf-8")
+                    attachment_info.append({
+                        "name": att.name,
+                        "type": "image",
+                        "base64": b64,
+                    })
+                    user_prompt += f"\n\n[附件图片: {att.name} - 可调用 analyze_image 工具分析此图片，传入 image_name=\"{att.name}\"]"
+                else:
+                    attachment_info.append({
+                        "name": att.name,
+                        "type": "image",
+                        "url": att.url,
+                    })
+                    user_prompt += f"\n\n[附件图片: {att.name} - 可调用 analyze_image 工具分析此图片]"
+            elif att.type == "markdown":
+                local_path = att.url[1:] if att.url.startswith("/") else att.url
+                md_content = ""
+                if os.path.exists(local_path):
+                    with open(local_path, "r", encoding="utf-8") as f:
+                        md_content = f.read()
+                attachment_info.append({
+                    "name": att.name,
+                    "type": "markdown",
+                    "content": md_content,
+                })
+                if md_content:
+                    user_prompt += f"\n\n[附件文档: {att.name}]\n{md_content}"
+
     tool_registry = create_tool_registry(
         component_lib=body.componentLib,
         output_session_id=output_session_id,
         message_id=message_id,
         request=request,
+        attachments=attachment_info if attachment_info else None,
     )
 
     agent = AgentCore(
@@ -631,55 +673,11 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
     async def event_stream():
         register_cancel(message_id)
         try:
-            user_prompt = body.prompt or ""
-
-            attachment_info = []
-            if body.attachments:
-                for att in body.attachments:
-                    if att.type == "image":
-                        local_path = None
-                        if att.url.startswith("/uploads/"):
-                            local_path = att.url[1:]
-                        if local_path and os.path.exists(local_path):
-                            import base64
-                            with open(local_path, "rb") as f:
-                                b64 = base64.b64encode(f.read()).decode("utf-8")
-                            attachment_info.append({
-                                "name": att.name,
-                                "type": "image",
-                                "base64": b64,
-                            })
-                        else:
-                            attachment_info.append({
-                                "name": att.name,
-                                "type": "image",
-                                "url": att.url,
-                            })
-                    elif att.type == "markdown":
-                        local_path = att.url[1:] if att.url.startswith("/") else att.url
-                        md_content = ""
-                        if os.path.exists(local_path):
-                            with open(local_path, "r", encoding="utf-8") as f:
-                                md_content = f.read()
-                        attachment_info.append({
-                            "name": att.name,
-                            "type": "markdown",
-                            "content": md_content,
-                        })
-
-            if attachment_info:
-                for ai in attachment_info:
-                    if ai["type"] == "image":
-                        user_prompt += f"\n\n[附件图片: {ai['name']} - Agent 可调用 analyze_image 工具分析此图片]"
-                    elif ai["type"] == "markdown" and ai.get("content"):
-                        user_prompt += f"\n\n[附件文档: {ai['name']}]\n{ai['content']}"
-
             all_files: list[GeneratedFile] = []
             step_messages: list[dict] = []
 
             async for event in agent.run(
                 user_prompt=user_prompt,
-                attachments=attachment_info if attachment_info else None,
                 task_id=message_id,
                 output_session_id=output_session_id,
                 message_id=message_id,

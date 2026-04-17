@@ -118,13 +118,13 @@ def _load_saved_vue_files(output_session_id: str, message_id: str) -> list[dict]
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
-            files.append({
+            files.append(_build_file_summary({
                 "name": filename,
                 "path": f"/src/{filename}",
                 "type": "file",
                 "language": "vue",
                 "content": content,
-            })
+            }))
         except Exception as e:
             logger.warning("读取 Vue 文件失败 %s: %s", filepath, e)
 
@@ -136,6 +136,7 @@ def create_tool_registry(
     output_session_id: str,
     message_id: str,
     request=None,
+    attachments: list[dict] | None = None,
 ) -> ToolRegistry:
     from app.services.glm4v_service import GLM4VService
     from app.services.requirement_service import RequirementService
@@ -144,31 +145,59 @@ def create_tool_registry(
 
     registry = ToolRegistry()
 
+    _attachment_map: dict[str, dict] = {}
+    if attachments:
+        for att in attachments:
+            if att.get("type") == "image":
+                key = att.get("name", "image")
+                _attachment_map[key] = att
+
     # ── 工具 1: 分析图片 ──
     async def analyze_image(args: dict) -> dict:
         glm4v = GLM4VService()
+
+        image_name = args.get("image_name", "")
+        att = _attachment_map.get(image_name) if image_name else None
+
+        if att:
+            image_source = att.get("base64") or att.get("url", "")
+            is_base64 = bool(att.get("base64"))
+        else:
+            image_source = args.get("image_source", "")
+            is_base64 = args.get("is_base64", False)
+
         result = await glm4v.describe_for_vue_generation(
-            image_source=args["image_source"],
-            is_base64=args.get("is_base64", False),
+            image_source=image_source,
+            is_base64=is_base64,
         )
         return result
 
+    attachment_names = list(_attachment_map.keys()) if _attachment_map else []
+    attachment_hint = ""
+    if attachment_names:
+        names_str = ", ".join(f'"{n}"' for n in attachment_names)
+        attachment_hint = f" 当前已有附件图片: {names_str}，调用时传入对应的 image_name 即可，无需手动提供图片数据。"
+
     registry.register(ToolDefinition(
         name="analyze_image",
-        description="分析设计稿图片，提取 UI 布局结构和组件信息。当用户上传了设计稿截图时应调用此工具。",
+        description=f"分析设计稿图片，提取 UI 布局结构和组件信息。当用户上传了设计稿截图时应调用此工具。{attachment_hint}",
         parameters={
             "type": "object",
             "properties": {
+                "image_name": {
+                    "type": "string",
+                    "description": "附件图片名称（从用户上传的附件列表中选择）",
+                },
                 "image_source": {
                     "type": "string",
-                    "description": "图片 URL 或 Base64 数据",
+                    "description": "图片 URL 或 Base64 数据（仅当 image_name 不适用时使用）",
                 },
                 "is_base64": {
                     "type": "boolean",
                     "description": "是否为 Base64 格式（默认 false）",
                 },
             },
-            "required": ["image_source"],
+            "required": [],
         },
         execute=analyze_image,
     ))
@@ -214,6 +243,7 @@ def create_tool_registry(
         result = await service.generate_vue_files(
             prompt=prompt,
             existing_files=existing_files,
+            component_lib=component_lib,
         )
 
         files = result.get("files", [])
@@ -300,7 +330,7 @@ def create_tool_registry(
 
     registry.register(ToolDefinition(
         name="search_component_doc",
-        description="查询组件库文档，获取组件的用法、属性、示例代码。CcUI 组件文档来自 vue3-ccui-generator Skill 的 references/ 目录（60+ 组件 MD 文件）。不确定组件用法时应先查询。",
+        description="查询组件库文档，获取组件的用法、属性、示例代码。CcUI 组件文档来自 vue3-ccui-generator Skill。不确定组件用法时应先查询，query 参数请使用组件的英文名。",
         parameters={
             "type": "object",
             "properties": {
@@ -317,6 +347,70 @@ def create_tool_registry(
             "required": ["query"],
         },
         execute=search_component_doc,
+    ))
+
+    # ── 工具 6: UX 优化 ──
+    async def optimize_ux(args: dict) -> dict:
+        from app.services.ai_factory import AIServiceFactory
+        from app.prompts import get_optimization_prompt
+
+        existing_files = args.get("files", [])
+        if not existing_files:
+            return {"error": "没有提供待优化的文件，请传入 generate_vue_code 产出的文件列表", "status": "failed"}
+
+        service = AIServiceFactory.get_service()
+
+        optimization_prompt = get_optimization_prompt(component_lib)
+
+        files_context = "\n\n".join([
+            f"--- 文件: {f.get('name', 'unknown')} (id: {f.get('id', 'unknown')}) ---\n{f.get('content', '')}"
+            for f in existing_files
+        ])
+        full_prompt = f"{optimization_prompt}\n\n待优化的文件：\n{files_context}\n"
+
+        result = await service.generate_vue_files(
+            prompt=full_prompt,
+            existing_files=existing_files,
+            component_lib=component_lib,
+        )
+
+        optimized_files = result.get("files", [])
+        message = result.get("message", "UX 优化完成")
+
+        save_stage_output(
+            "optimization", 3, result,
+            output_session_id, message_id, "json",
+        )
+        if optimized_files:
+            save_vue_files_from_json(
+                optimized_files, output_session_id, 3, "optimization", message_id,
+            )
+
+        file_summaries = [_build_file_summary(f) for f in optimized_files]
+
+        return {
+            "status": "success",
+            "file_count": len(file_summaries),
+            "files": file_summaries,
+            "message": message,
+        }
+
+    registry.register(ToolDefinition(
+        name="optimize_ux",
+        description="【必须步骤】对 generate_vue_code 产出的代码进行 UX 优化，调用企业 Skill（如 ccui-ux-guardian 或 enterprise-vue-refiner）校验并调整样式、布局，确保代码符合企业 UI/UX 标准。优化仅限样式和布局层面，不增加复杂逻辑。生成代码后必须调用此工具。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "description": "待优化的文件列表（来自 generate_vue_code 的输出）",
+                    "items": {"type": "object"},
+                },
+            },
+            "required": ["files"],
+        },
+        execute=optimize_ux,
+        required=True,
     ))
 
     return registry
@@ -392,6 +486,64 @@ async def _query_ux_spec_files(
 
 _CCUI_DOCS_DIR = os.path.join(_SKILL_DATA_DIR, "vue3-ccui-generator/references")
 
+_CCUI_COMPONENT_CATEGORIES = {
+    "基础": ["button", "icon", "card", "color", "link", "border", "scrollbar", "ellipsis", "space"],
+    "布局": ["layout", "container", "divider"],
+    "导航": ["menu", "breadcrumb", "tabs", "dropdown", "anchor", "page-header", "steps"],
+    "数据录入": ["form", "input", "input-number", "input-tag", "select", "virtualized-select",
+                 "cascader", "checkbox", "radio", "switch", "slider", "rate", "color-picker",
+                 "date-picker", "time-picker", "time-select", "date-time-picker",
+                 "autocomplete", "mention", "upload", "transfer"],
+    "数据展示": ["table", "table-column", "tree", "tree-select", "tag", "avatar", "badge",
+                 "image", "descriptions", "statistic", "collapse", "timeline", "result"],
+    "反馈": ["dialog", "drawer", "popover", "tooltip", "popconfirm", "message", "message-box"],
+    "其他": ["pagination", "backtop", "affix", "segmented"],
+}
+
+_CCUI_ALIAS_MAP = {
+    "grid": "layout", "栅格": "layout", "行": "layout", "列": "layout",
+    "下拉": "select", "选择器": "select", "下拉框": "select",
+    "输入框": "input", "文本框": "input",
+    "弹出框": "popover", "气泡": "popover",
+    "弹窗": "dialog", "对话框": "dialog", "模态框": "dialog",
+    "抽屉": "drawer",
+    "表格": "table",
+    "表单": "form",
+    "按钮": "button",
+    "卡片": "card",
+    "日期": "date-picker", "时间": "time-picker",
+    "标签": "tag",
+    "导航": "menu", "菜单": "menu",
+    "图标": "icon",
+    "分页": "pagination",
+    "上传": "upload",
+    "树形": "tree", "树": "tree",
+    "级联": "cascader",
+    "提示": "tooltip", "气泡提示": "tooltip",
+    "确认框": "popconfirm",
+    "开关": "switch",
+    "滑块": "slider",
+    "评分": "rate",
+    "折叠面板": "collapse", "手风琴": "collapse",
+    "面包屑": "breadcrumb",
+    "步骤条": "steps",
+    "头像": "avatar",
+    "空状态": "result",
+    "加载": "affix",
+    "段落": "descriptions",
+    "统计": "statistic",
+    "文本省略": "ellipsis",
+}
+
+
+def _build_component_category_hint() -> str:
+    if not os.path.isdir(_CCUI_DOCS_DIR):
+        return ""
+    lines = []
+    for category, components in _CCUI_COMPONENT_CATEGORIES.items():
+        lines.append(f"{category}: {', '.join(components)}")
+    return "\nCcUI 组件分类: " + " | ".join(lines)
+
 
 async def _query_component_library(component_lib: str, query: str) -> dict:
     if component_lib.lower() == "ccui":
@@ -409,21 +561,32 @@ async def _query_ccui_doc(query: str) -> dict:
         }
 
     query_lower = query.lower().strip()
+
+    mapped = _CCUI_ALIAS_MAP.get(query_lower) or _CCUI_ALIAS_MAP.get(query.strip())
+    search_terms = {query_lower}
+    if mapped:
+        search_terms.add(mapped.lower())
+
     matched_files = []
     for filename in os.listdir(_CCUI_DOCS_DIR):
         if not filename.endswith(".md"):
             continue
         doc_name = filename[:-3]
-        if query_lower in doc_name.lower() or doc_name.lower() in query_lower:
+        if any(term in doc_name.lower() or doc_name.lower() in term for term in search_terms):
             matched_files.append((doc_name, os.path.join(_CCUI_DOCS_DIR, filename)))
 
     if not matched_files:
-        all_components = sorted(f[:-3] for f in os.listdir(_CCUI_DOCS_DIR) if f.endswith(".md"))
+        suggestion = ""
+        for alias, target in _CCUI_ALIAS_MAP.items():
+            if alias in query_lower or query_lower in alias:
+                suggestion = f" 你是否要查询: `{target}`?"
+                break
+        category_hint = _build_component_category_hint()
         return {
             "component_lib": "CcUI",
             "query": query,
             "found": False,
-            "message": f"未找到组件 '{query}' 的文档。可用的组件包括: {', '.join(all_components[:30])}",
+            "message": f"未找到组件 '{query}' 的文档。{suggestion}{category_hint}",
         }
 
     exact_match = next((d for d, _ in matched_files if d.lower() == query_lower), None)
