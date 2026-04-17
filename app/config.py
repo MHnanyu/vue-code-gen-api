@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     
     GLM4V_API_KEY: Optional[str] = ""
     GLM4V_API_URL: str = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
-    GLM4V_MODEL: str = "glm-5v-turbo"
+    GLM4V_MODEL: str = "glm-4.6v-flashx"
     
     MINIMAX_API_KEY: Optional[str] = ""
     MINIMAX_API_URL: str = "https://api.minimaxi.com/anthropic"

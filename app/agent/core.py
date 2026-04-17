@@ -4,6 +4,7 @@ Agent 核心循环：LLM 自主决策 + Tool Calling + 结果回传。
 SuperDesign 使用 Vercel AI SDK 的 streamText({ maxSteps: 10 })，
 我们用 httpx 手动实现等价的 while + tool_call 循环。
 """
+import asyncio
 import json
 import logging
 import os
@@ -129,14 +130,17 @@ class AgentCore:
                 except json.JSONDecodeError:
                     arguments = {}
 
-                if tool_name in self._required_tools:
-                    self._called_required.add(tool_name)
-
                 try:
                     result = await self.tool_registry.execute(tool_name, arguments)
                 except Exception as e:
                     result = {"error": str(e)}
                     logger.error("工具执行失败: %s - %s", tool_name, e)
+
+                if (
+                    tool_name in self._required_tools
+                    and not (isinstance(result, dict) and "error" in result)
+                ):
+                    self._called_required.add(tool_name)
 
                 yield emit_tool_call_result(
                     tool_name=tool_name,
@@ -228,28 +232,37 @@ class AgentCore:
         base_url = self._get_base_url()
         api_url = f"{base_url}/chat/completions"
 
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(api_url, headers=headers, json=payload)
-                response.raise_for_status()
-                data = response.json()
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    response = await client.post(api_url, headers=headers, json=payload)
+                    response.raise_for_status()
+                    data = response.json()
 
-            if "choices" not in data or len(data["choices"]) == 0:
-                logger.error("LLM 返回空 choices: %s", data)
-                return None
+                if "choices" not in data or len(data["choices"]) == 0:
+                    logger.error("LLM 返回空 choices: %s", data)
+                    return None
 
-            message = data["choices"][0].get("message", {})
-            return {
-                "content": message.get("content", ""),
-                "tool_calls": message.get("tool_calls") or [],
-                "finish_reason": data["choices"][0].get("finish_reason", ""),
-            }
-        except httpx.HTTPStatusError as e:
-            logger.error("LLM HTTP 错误: %s - %s", e.response.status_code, e.response.text)
-            return None
-        except Exception as e:
-            logger.error("LLM 调用异常: %s", e)
-            return None
+                message = data["choices"][0].get("message", {})
+                return {
+                    "content": message.get("content", ""),
+                    "tool_calls": message.get("tool_calls") or [],
+                    "finish_reason": data["choices"][0].get("finish_reason", ""),
+                }
+            except httpx.HTTPStatusError as e:
+                logger.error("LLM HTTP 错误 (第 %d/%d 次): %s - %s", attempt + 1, max_retries, e.response.status_code, e.response.text)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                else:
+                    return None
+            except Exception as e:
+                logger.error("LLM 调用异常 (第 %d/%d 次): %s", attempt + 1, max_retries, e)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                else:
+                    return None
+        return None
 
     def _extract_files(self, messages: list[dict]) -> list[dict]:
         if self._output_session_id and self._message_id:

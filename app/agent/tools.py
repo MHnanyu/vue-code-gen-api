@@ -90,6 +90,19 @@ def _build_file_summary(f: dict) -> dict:
     }
 
 
+_FILE_CONTENT_MAX_CHARS = 6000
+
+
+def _build_file_with_content(f: dict) -> dict:
+    content = f.get("content", "")
+    result = _build_file_summary(f)
+    if content:
+        if len(content) > _FILE_CONTENT_MAX_CHARS:
+            content = content[:_FILE_CONTENT_MAX_CHARS] + f"\n\n...(代码已截断，原始长度 {len(content)} 字符)"
+        result["content"] = content
+    return result
+
+
 def _load_saved_vue_files(output_session_id: str, message_id: str) -> list[dict] | None:
     base_dir = os.path.join("output", output_session_id, message_id)
     if not os.path.isdir(base_dir):
@@ -129,6 +142,33 @@ def _load_saved_vue_files(output_session_id: str, message_id: str) -> list[dict]
             logger.warning("读取 Vue 文件失败 %s: %s", filepath, e)
 
     return files if files else None
+
+
+def _ensure_files_have_content(
+    files: list[dict],
+    output_session_id: str,
+    message_id: str,
+) -> list[dict]:
+    result = []
+    for f in files:
+        if f.get("content"):
+            result.append(f)
+            continue
+
+        disk_files = _load_saved_vue_files(output_session_id, message_id)
+        if disk_files:
+            name = f.get("name", "")
+            matched = next((df for df in disk_files if df.get("name") == name), None)
+            if matched and matched.get("content"):
+                merged = dict(f)
+                merged["content"] = matched["content"]
+                result.append(merged)
+                continue
+
+        logger.warning("文件 %s 缺少 content 且磁盘上未找到，将使用空内容传入优化", f.get("name"))
+        result.append(f)
+
+    return result
 
 
 def create_tool_registry(
@@ -257,12 +297,12 @@ def create_tool_registry(
             files, output_session_id, 2, "generation", message_id,
         )
 
-        file_summaries = [_build_file_summary(f) for f in files]
+        file_infos = [_build_file_with_content(f) for f in files]
 
         return {
             "status": "success",
             "file_count": len(files),
-            "files": file_summaries,
+            "files": file_infos,
             "message": message,
         }
 
@@ -358,19 +398,23 @@ def create_tool_registry(
         if not existing_files:
             return {"error": "没有提供待优化的文件，请传入 generate_vue_code 产出的文件列表", "status": "failed"}
 
+        files_with_content = _ensure_files_have_content(
+            existing_files, output_session_id, message_id,
+        )
+
         service = AIServiceFactory.get_service()
 
         optimization_prompt = get_optimization_prompt(component_lib)
 
         files_context = "\n\n".join([
             f"--- 文件: {f.get('name', 'unknown')} (id: {f.get('id', 'unknown')}) ---\n{f.get('content', '')}"
-            for f in existing_files
+            for f in files_with_content
         ])
         full_prompt = f"{optimization_prompt}\n\n待优化的文件：\n{files_context}\n"
 
         result = await service.generate_vue_files(
             prompt=full_prompt,
-            existing_files=existing_files,
+            existing_files=files_with_content,
             component_lib=component_lib,
         )
 
@@ -386,12 +430,12 @@ def create_tool_registry(
                 optimized_files, output_session_id, 3, "optimization", message_id,
             )
 
-        file_summaries = [_build_file_summary(f) for f in optimized_files]
+        file_infos = [_build_file_with_content(f) for f in optimized_files]
 
         return {
             "status": "success",
-            "file_count": len(file_summaries),
-            "files": file_summaries,
+            "file_count": len(file_infos),
+            "files": file_infos,
             "message": message,
         }
 
