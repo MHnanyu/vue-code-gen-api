@@ -151,7 +151,8 @@ class ToolCallResultEvent(BaseModel):
     toolName: str
     result: Optional[Any] = None
     step: int
-    outputUrl: Optional[str] = None
+    outputUrls: Optional[List[str]] = None
+    outputType: Optional[str] = None
     timestamp: str
 
 

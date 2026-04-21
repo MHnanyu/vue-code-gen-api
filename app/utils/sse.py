@@ -121,12 +121,15 @@ def emit_done(
     return _sse_event("done", data)
 
 
-def emit_agent_thinking(content: str, step: int) -> str:
-    return _sse_event("agent_thinking", {
+def emit_agent_thinking(content: str, step: int, task_id: str | None = None) -> str:
+    data: dict[str, Any] = {
         "content": content,
         "step": step,
         "timestamp": _now_iso(),
-    })
+    }
+    if task_id is not None:
+        data["taskId"] = task_id
+    return _sse_event("agent_thinking", data)
 
 
 def emit_tool_call_start(
@@ -146,7 +149,7 @@ def emit_tool_call_result(
     tool_name: str,
     result: dict,
     step: int,
-    output_url: str | None = None,
+    output_info: tuple[list[str], str] | None = None,
 ) -> str:
     data: dict[str, Any] = {
         "toolName": tool_name,
@@ -154,8 +157,10 @@ def emit_tool_call_result(
         "step": step,
         "timestamp": _now_iso(),
     }
-    if output_url is not None:
-        data["outputUrl"] = output_url
+    if output_info is not None:
+        urls, output_type = output_info
+        data["outputUrls"] = urls
+        data["outputType"] = output_type
     return _sse_event("tool_call_result", data)
 
 

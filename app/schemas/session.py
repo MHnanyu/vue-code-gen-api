@@ -17,6 +17,16 @@ class StepMessage(BaseModel):
     outputType: Optional[str] = Field(default=None, description="产出类型（markdown/json/vue）")
     filePath: Optional[str] = Field(default=None, description="产出文件路径")
     duration: Optional[float] = Field(default=None, description="执行耗时（秒）")
+    fileCategory: Optional[str] = Field(default=None, description="文件类别（file=单文件/files=文件数组）")
+
+
+class ToolCallMessage(BaseModel):
+    toolName: str = Field(description="工具名称")
+    arguments: Optional[str] = Field(default=None, description="调用参数（JSON字符串）")
+    status: Optional[str] = Field(default=None, description="执行状态（success/failed）")
+    result: Optional[dict] = Field(default=None, description="执行结果摘要")
+    duration: Optional[float] = Field(default=None, description="执行耗时（秒）")
+    timestamp: Optional[str] = Field(default=None, description="调用时间")
 
 
 class Message(BaseModel):
@@ -27,6 +37,7 @@ class Message(BaseModel):
     failedStep: Optional[int] = Field(default=None, description="失败的步骤编号，前端可直接作为 fromStep 重试")
     stages: Optional[dict] = Field(default=None, description="各步骤执行状态")
     stepMessages: Optional[List[StepMessage]] = Field(default=None, description="各步骤的摘要信息，前端可逐步展示")
+    toolCalls: Optional[List[ToolCallMessage]] = Field(default=None, description="所有工具调用的完整记录")
     files: Optional[List[dict]] = Field(default=None, description="该消息关联的文件快照，用于重试时回滚")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 

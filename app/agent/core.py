@@ -7,6 +7,7 @@ SuperDesign 使用 Vercel AI SDK 的 streamText({ maxSteps: 10 })，
 import asyncio
 import json
 import logging
+import os
 from typing import AsyncGenerator
 
 import httpx
@@ -121,7 +122,7 @@ class AgentCore:
             finish_reason = response.get("finish_reason", "")
 
             if content_text:
-                yield emit_agent_thinking(content_text, step)
+                yield emit_agent_thinking(content_text, step, task_id=task_id)
 
             if not tool_calls:
                 logger.info(
@@ -216,38 +217,44 @@ class AgentCore:
                     + f"\n\n[结果已截断，原始长度 {len(result_json)} 字符]"
                 )
 
-            output_url = self._build_output_url(tool_name)
+            output_info = self._build_output_info(tool_name)
 
-            return tc, result, result_json, output_url
-
+            return tc, result, result_json, output_info
         results = await asyncio.gather(*[_run_single(tc) for tc in tool_calls])
         events: list[str] = []
 
-        for tc, result, _, output_url in results:
+        for tc, result, _, output_info in results:
             tool_name = tc.get("function", {}).get("name", "")
             events.append(emit_tool_call_result(
                 tool_name=tool_name,
                 result=result,
                 step=step,
-                output_url=output_url,
+                output_info=output_info,
             ))
 
         return events, [(tc, res, rj) for tc, res, rj, _ in results]
 
     _TOOL_OUTPUT_MAP = {
-        "normalize_requirement": ("{base}/step1_requirement.md", "file"),
-        "generate_vue_code": ("{base}/step2_generation_vue/", "directory"),
-        "optimize_ux": ("{base}/step3_optimization_vue/", "directory"),
+        "normalize_requirement": ("step1_requirement.md", "file", "file"),
+        "generate_vue_code": ("step2_generation_vue", "directory", "files"),
+        "optimize_ux": ("step3_optimization_vue", "directory", "files"),
     }
 
-    def _build_output_url(self, tool_name: str) -> str | None:
+    def _build_output_info(self, tool_name: str) -> tuple[list[str], str] | None:
         pattern = self._TOOL_OUTPUT_MAP.get(tool_name)
         if not pattern:
             return None
         if not self._output_session_id or not self._message_id:
             return None
-        base = f"/output/{self._output_session_id}/{self._message_id}"
-        return pattern[0].format(base=base)
+        relative, kind, output_type = pattern
+        base = f"output/{self._output_session_id}/{self._message_id}"
+        if kind == "file":
+            return [f"{base}/{relative}"], output_type
+        dir_path = os.path.join(base, relative)
+        if not os.path.isdir(dir_path):
+            return None
+        urls = [f"{dir_path}/{fname}" for fname in sorted(os.listdir(dir_path))]
+        return (urls, output_type) if urls else None
 
     def _build_messages(self, user_prompt: str, context: dict | None) -> list[dict]:
         system_prompt = self._build_system_prompt()

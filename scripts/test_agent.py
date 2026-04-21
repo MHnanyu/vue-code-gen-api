@@ -111,7 +111,7 @@ async def test_agent_stream(prompt: str, component_lib: str = "ElementUI", image
                         elif current_event_type == "tool_call_result":
                             tool = data.get("toolName", "?") if isinstance(data, dict) else "?"
                             result = data.get("result", {}) if isinstance(data, dict) else {}
-                            output_url = data.get("outputUrl") if isinstance(data, dict) else None
+                            output_urls = data.get("outputUrls") if isinstance(data, dict) else None
                             if isinstance(result, dict):
                                 status = result.get("status", "N/A")
                                 file_count = result.get("file_count", "N/A")
@@ -134,8 +134,9 @@ async def test_agent_stream(prompt: str, component_lib: str = "ElementUI", image
                                     print(f"                   (已截断，共 {len(result_str)} 字符)")
                                 else:
                                     print(f"         ✅ Result: {result_str}")
-                            if output_url:
-                                print(f"         📎 Output: {output_url}")
+                            if output_urls:
+                                for u in output_urls:
+                                    print(f"         📎 Output: {u}")
                         elif current_event_type == "agent_done":
                             files = data.get("files", []) if isinstance(data, dict) else []
                             print(f"\n{'='*60}")

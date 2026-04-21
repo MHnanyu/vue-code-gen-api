@@ -235,6 +235,76 @@ async def update_session_with_ai_message(
     logger.info(f"会话更新成功（含AI消息）- sessionId: {session_id}, failedStep: {failed_step}, messageId: {log_id}")
 
 
+async def upsert_session_message(
+    db,
+    session_id: str,
+    message_id: str,
+    content: str,
+    failed_step: int | None,
+    stages: dict,
+    step_messages: list[dict] | None,
+    files: list[dict] | None,
+    tool_calls: list[dict] | None = None,
+):
+    """Insert a message on first call, then update in-place on subsequent calls.
+
+    Used for agent mode real-time step persistence: the message is created when
+    the first tool completes and updated as more steps finish, avoiding duplicate
+    messages on crash-recovery restarts.
+    """
+    if session_id is None or db is None:
+        return
+
+    from app.schemas.session import Message
+
+    now = datetime.utcnow()
+    stage_dump = {k: v.model_dump() if hasattr(v, "model_dump") else v for k, v in stages.items()} if stages else None
+
+    existing = await db.sessions.find_one(
+        {"id": session_id, "messages.id": message_id},
+        {"messages.$": 1},
+    )
+
+    if existing:
+        await db.sessions.update_one(
+            {"id": session_id, "messages.id": message_id},
+            {
+                "$set": {
+                    "messages.$.content": content,
+                    "messages.$.failedStep": failed_step,
+                    "messages.$.stages": stage_dump,
+                    "messages.$.stepMessages": step_messages,
+                    "messages.$.toolCalls": tool_calls,
+                    "updatedAt": now,
+                    "files": files or [],
+                }
+            },
+        )
+    else:
+        ai_msg = Message(
+            id=message_id,
+            role="assistant",
+            content=content,
+            failedStep=failed_step,
+            stages=stage_dump,
+            stepMessages=step_messages,
+            toolCalls=tool_calls,
+            files=files,
+        )
+        await db.sessions.update_one(
+            {"id": session_id},
+            {
+                "$push": {"messages": ai_msg.model_dump()},
+                "$set": {"updatedAt": now, "files": files or []},
+            },
+        )
+
+    logger.info(
+        "Agent 步骤落表 - sessionId: %s, messageId: %s, steps: %d",
+        session_id, message_id, len(step_messages) if step_messages else 0,
+    )
+
+
 def _delete_stage_files(output_dir: str, step: int):
     step_files = {
         0: ["step0_final_prompt.md"],
