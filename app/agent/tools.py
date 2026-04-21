@@ -345,8 +345,8 @@ def create_tool_registry(
             "properties": {
                 "spec_type": {
                     "type": "string",
-                    "enum": ["foundation", "component", "layout", "token_mapping"],
-                    "description": "规范类型：foundation=基础样式（颜色/字体/间距/阴影/圆角）、component=组件规则（表格/表单/按钮等）、layout=全局布局（安全边距/页面背景/导航）、token_mapping=Tailwind Token 映射",
+                    "enum": ["foundation", "component", "layout"],
+                    "description": "规范类型：foundation=基础样式（颜色/字体/间距/阴影/圆角）、component=组件规则（表格/表单/按钮等）、layout=全局布局（安全边距/页面背景/导航）",
                 },
                 "topic": {
                     "type": "string",
@@ -440,7 +440,7 @@ def create_tool_registry(
 
     registry.register(ToolDefinition(
         name="optimize_ux",
-        description="【必须步骤】对 generate_vue_code 产出的代码进行 UX 优化，调用企业 Skill（如 ccui-ux-guardian 或 enterprise-vue-refiner）校验并调整样式、布局，确保代码符合企业 UI/UX 标准。优化仅限样式和布局层面，不增加复杂逻辑。生成代码后必须调用此工具。",
+        description="【必须步骤】对 generate_vue_code 产出的代码进行 UX 优化，调用企业 Skill（enterprise-vue-refiner）校验并调整样式、布局，确保代码符合企业 UI/UX 标准。优化仅限样式和布局层面，不增加复杂逻辑。生成代码后必须调用此工具。",
         parameters={
             "type": "object",
             "properties": {
@@ -461,20 +461,12 @@ def create_tool_registry(
 
 # ── UX 规范查询实现 ──
 
-_SKILL_DATA_DIR = os.path.expanduser("~/.openclaw/skills")
+_SKILL_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "skills")
 _UX_SPEC_PATHS = {
-    "ccui": {
-        "foundation": os.path.join(_SKILL_DATA_DIR, "ccui-ux-guardian/data/foundation-rules.csv"),
-        "component": os.path.join(_SKILL_DATA_DIR, "ccui-ux-guardian/data/component-rules.csv"),
-        "layout": os.path.join(_SKILL_DATA_DIR, "ccui-ux-guardian/data/global-layout-rules.csv"),
-    },
-    "elementui": {
-        "foundation": os.path.join(_SKILL_DATA_DIR, "enterprise-vue-refiner/data/foundation-rules.csv"),
-        "component": os.path.join(_SKILL_DATA_DIR, "enterprise-vue-refiner/data/component-rules.csv"),
-        "layout": os.path.join(_SKILL_DATA_DIR, "enterprise-vue-refiner/data/global-layout-rules.csv"),
-    },
+    "foundation": os.path.join(_SKILL_DATA_DIR, "enterprise-vue-refiner/data/foundation-rules.csv"),
+    "component": os.path.join(_SKILL_DATA_DIR, "enterprise-vue-refiner/data/component-rules.csv"),
+    "layout": os.path.join(_SKILL_DATA_DIR, "enterprise-vue-refiner/data/global-layout-rules.csv"),
 }
-_TOKEN_MAPPING_PATH = os.path.join(_SKILL_DATA_DIR, "enterprise-ui-ux-refiner/data/tailwind-token-mapping.csv")
 
 
 async def _query_ux_spec_files(
@@ -483,11 +475,7 @@ async def _query_ux_spec_files(
     topic: str = "",
     max_rules: int = 20,
 ) -> dict:
-    if spec_type == "token_mapping":
-        csv_path = _TOKEN_MAPPING_PATH
-    else:
-        lib_key = "ccui" if component_lib.lower() == "ccui" else "elementui"
-        csv_path = _UX_SPEC_PATHS.get(lib_key, {}).get(spec_type)
+    csv_path = _UX_SPEC_PATHS.get(spec_type)
 
     if not csv_path or not os.path.exists(csv_path):
         return {"error": f"规范文件不存在: {spec_type}", "rules": []}

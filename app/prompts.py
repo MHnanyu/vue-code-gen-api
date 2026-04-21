@@ -14,7 +14,7 @@ CCUI_GENERATION_PROMPT = """请调用 vue3-ccui-generator skill，基于以下UX
 UX规范文档：
 """
 
-CCUI_OPTIMIZATION_PROMPT = """请调用 ccui-ux-guardian skill，基于原始的 Vue 组件，生成符合企业 UI/UX 标准的 Vue 组件。
+CCUI_OPTIMIZATION_PROMPT = """请调用 enterprise-vue-refiner skill，基于原始的 Vue 组件，生成符合企业 UI/UX 标准的 Vue 组件。
 
 【注意】
 - 保持原型极简原则，优化仅限样式和布局层面
