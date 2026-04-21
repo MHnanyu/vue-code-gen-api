@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     MOCK_MODE: bool = False
 
     AGENT_MAX_STEPS: int = 10
+    AGENT_TIMEOUT: int = 600
     AGENT_ENABLE_REVIEW: bool = False
     GLM5_AGENT_MODEL: Optional[str] = ""
     

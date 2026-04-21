@@ -82,12 +82,24 @@ class AgentCore:
             return
 
         async with httpx.AsyncClient(timeout=120.0) as llm_client:
-            async for event in self._run_loop(
-                messages, tools, llm_client,
-                user_prompt, session_context, task_id,
-                output_session_id, message_id,
-            ):
-                yield event
+            try:
+                async for event in asyncio.wait_for(
+                    self._run_loop(
+                        messages, tools, llm_client,
+                        user_prompt, session_context, task_id,
+                        output_session_id, message_id,
+                    ),
+                    timeout=settings.AGENT_TIMEOUT,
+                ):
+                    yield event
+            except asyncio.TimeoutError:
+                logger.error("Agent 执行超时 (%d 秒)", settings.AGENT_TIMEOUT)
+                yield emit_error(
+                    code=500,
+                    message=f"Agent 执行超时 ({settings.AGENT_TIMEOUT} 秒)",
+                    failed_step=self.max_steps,
+                    stages={},
+                )
 
     async def _run_loop(
         self,
@@ -250,7 +262,7 @@ class AgentCore:
         base = f"output/{self._output_session_id}/{self._message_id}"
         if kind == "file":
             return [f"{base}/{relative}"], output_type
-        dir_path = os.path.join(base, relative)
+        dir_path = os.path.join(base, relative).replace("\\", "/")
         if not os.path.isdir(dir_path):
             return None
         urls = [f"{dir_path}/{fname}" for fname in sorted(os.listdir(dir_path))]

@@ -142,7 +142,7 @@ import {{ ref }} from 'vue'
 
 def _load_final_files_as_generated(output_dir: str) -> list[GeneratedFile]:
     """Read final Vue files from disk (prefer optimization over generation)."""
-    from app.agent.tools import _load_saved_vue_files
+    from app.agent.tools import _build_file_with_content
 
     parts = output_dir.replace("\\", "/").split("/")
     if len(parts) >= 3:
@@ -151,20 +151,44 @@ def _load_final_files_as_generated(output_dir: str) -> list[GeneratedFile]:
     else:
         return []
 
-    disk_files = _load_saved_vue_files(session_id, msg_id)
-    if not disk_files:
+    base_dir = os.path.join("output", session_id, msg_id)
+    if not os.path.isdir(base_dir):
         return []
 
+    candidates = []
+    try:
+        for entry in os.listdir(base_dir):
+            entry_path = os.path.join(base_dir, entry)
+            if os.path.isdir(entry_path) and entry.endswith("_vue"):
+                candidates.append(entry_path)
+    except OSError:
+        return []
+
+    if not candidates:
+        return []
+
+    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    latest_dir = candidates[0]
+
     result = []
-    for f in disk_files:
-        result.append(GeneratedFile(
-            id=str(uuid4()),
-            name=f.get("name", "unknown"),
-            path=f.get("path", ""),
-            type="file",
-            language="vue",
-            content=f.get("content", ""),
-        ))
+    for filename in os.listdir(latest_dir):
+        if not filename.endswith(".vue"):
+            continue
+        filepath = os.path.join(latest_dir, filename)
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+            result.append(GeneratedFile(
+                id=str(uuid4()),
+                name=filename,
+                path=f"/src/{filename}",
+                type="file",
+                language="vue",
+                content=content,
+            ))
+        except Exception as e:
+            logger.warning("[Agent] 读取 Vue 文件失败 %s: %s", filepath, e)
+
     return result
 
 
@@ -249,13 +273,18 @@ async def _collect_and_persist_step(
         if mapped:
             stage_num, stage_name, output_type = mapped
 
+            raw_urls = data.get("outputUrls")
+            if isinstance(raw_urls, list):
+                file_path = raw_urls[0] if len(raw_urls) == 1 else json.dumps(raw_urls, ensure_ascii=False)
+            else:
+                file_path = raw_urls
             step_messages.append({
                 "stage": stage_num,
                 "stageName": stage_name,
                 "message": result_data.get("error", "") if is_error else f"{stage_name} 完成",
                 "status": status,
                 "outputType": output_type,
-                "filePath": data.get("outputUrls"),
+                "filePath": file_path,
                 "fileCategory": data.get("outputType"),
                 "duration": duration,
             })
@@ -308,8 +337,22 @@ async def _save_agent_result(
 
 def _scan_latest_vue_files(output_dir: str) -> list[dict]:
     """Scan the latest Vue output directory and return file list with download URLs."""
-    if not os.path.isdir(output_dir):
+    from app.agent.tools import _load_saved_vue_files
+
+    parts = output_dir.replace("\\", "/").split("/")
+    if len(parts) >= 3:
+        session_id = parts[-2]
+        msg_id = parts[-1]
+    else:
         return []
+
+    disk_files = _load_saved_vue_files(session_id, msg_id)
+    if not disk_files:
+        return []
+
+    base_dir = output_dir.replace("\\", "/")
+    if base_dir.startswith("/"):
+        base_dir = base_dir[1:]
 
     candidates = []
     try:
@@ -325,28 +368,22 @@ def _scan_latest_vue_files(output_dir: str) -> list[dict]:
 
     candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     latest_dir = candidates[0]
-
     rel_dir = latest_dir.replace("\\", "/")
     if rel_dir.startswith("/"):
         rel_dir = rel_dir[1:]
 
     files = []
-    for filename in os.listdir(latest_dir):
-        if not filename.endswith(".vue"):
+    for df in disk_files:
+        filename = df.get("name", "")
+        if not filename:
             continue
-        filepath = os.path.join(latest_dir, filename)
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                content = f.read()
-            files.append({
-                "name": filename,
-                "path": f"/src/{filename}",
-                "downloadUrl": f"/output/{rel_dir}/{filename}",
-                "lines": content.count("\n") + 1,
-                "sizeBytes": len(content.encode("utf-8")),
-            })
-        except Exception as e:
-            logger.warning("[Agent] 读取 Vue 文件失败 %s: %s", filepath, e)
+        files.append({
+            "name": filename,
+            "path": df.get("path", f"/src/{filename}"),
+            "downloadUrl": f"/output/{rel_dir}/{filename}",
+            "lines": df.get("lines", 0),
+            "sizeBytes": df.get("size_bytes", 0),
+        })
 
     return files
 
@@ -833,7 +870,7 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
     )
 
     output_session_id = body.sessionId or f"no_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    is_retry = body.fromStep is not None and body.fromStep >= 0 and body.sessionId
+    is_retry = body.fromStep is not None and 0 <= body.fromStep <= 3 and body.sessionId
 
     db = get_database() if body.sessionId else None
     await _check_session_mode(body.sessionId, "agent", db)
@@ -918,7 +955,9 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
             _HEARTBEAT_INTERVAL = 30
             _DONE = object()
             _HEARTBEAT = ": ping\n\n"
-            queue: asyncio.Queue[object] = asyncio.Queue()
+            queue: asyncio.Queue[object] = asyncio.Queue(maxsize=256)
+
+            _disconnected = False
 
             async def feed_agent():
                 try:
@@ -942,7 +981,15 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
 
             try:
                 while True:
-                    item = await queue.get()
+                    try:
+                        item = await asyncio.wait_for(queue.get(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        if await request.is_disconnected():
+                            logger.info("[Agent SSE] 客户端已断开连接")
+                            set_cancel(message_id)
+                            _disconnected = True
+                            break
+                        continue
                     if item is _DONE:
                         break
                     await _collect_and_persist_step(
@@ -953,11 +1000,14 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
             finally:
                 hb_task.cancel()
                 agent_task.cancel()
+                for t in (hb_task, agent_task):
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
-            if agent_task.done() and not agent_task.cancelled():
-                exc = agent_task.exception()
-                if exc:
-                    raise exc
+            if _disconnected:
+                return
 
             vue_file_urls = _scan_latest_vue_files(output_dir)
             if vue_file_urls:
@@ -988,13 +1038,16 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
                 stages=stages,
             )
 
-            all_files = _load_final_files_as_generated(output_dir)
-            await _save_agent_result(
-                db, body.sessionId, message_id,
-                all_files, step_messages, stages, failed_step=None,
-                ai_message=f"Agent 执行异常: {str(e)}",
-                tool_calls=_tool_calls,
-            )
+            try:
+                all_files = _load_final_files_as_generated(output_dir)
+                await _save_agent_result(
+                    db, body.sessionId, message_id,
+                    all_files, step_messages, stages, failed_step=None,
+                    ai_message=f"Agent 执行异常: {str(e)}",
+                    tool_calls=_tool_calls,
+                )
+            except Exception as save_err:
+                logger.error("[Agent SSE] 保存错误结果失败: %s", str(save_err), exc_info=True)
 
         finally:
             unregister_cancel(message_id)

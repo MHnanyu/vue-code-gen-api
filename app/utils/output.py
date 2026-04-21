@@ -266,19 +266,19 @@ async def upsert_session_message(
     )
 
     if existing:
+        update_fields = {
+            "messages.$.content": content,
+            "messages.$.failedStep": failed_step,
+            "messages.$.stages": stage_dump,
+            "messages.$.stepMessages": step_messages,
+            "messages.$.toolCalls": tool_calls,
+            "updatedAt": now,
+        }
+        if files is not None:
+            update_fields["files"] = files
         await db.sessions.update_one(
             {"id": session_id, "messages.id": message_id},
-            {
-                "$set": {
-                    "messages.$.content": content,
-                    "messages.$.failedStep": failed_step,
-                    "messages.$.stages": stage_dump,
-                    "messages.$.stepMessages": step_messages,
-                    "messages.$.toolCalls": tool_calls,
-                    "updatedAt": now,
-                    "files": files or [],
-                }
-            },
+            {"$set": update_fields},
         )
     else:
         ai_msg = Message(
@@ -291,12 +291,13 @@ async def upsert_session_message(
             toolCalls=tool_calls,
             files=files,
         )
+        push_fields: dict = {"messages": ai_msg.model_dump()}
+        set_fields: dict = {"updatedAt": now}
+        if files is not None:
+            set_fields["files"] = files
         await db.sessions.update_one(
             {"id": session_id},
-            {
-                "$push": {"messages": ai_msg.model_dump()},
-                "$set": {"updatedAt": now, "files": files or []},
-            },
+            {"$push": push_fields, "$set": set_fields},
         )
 
     logger.info(

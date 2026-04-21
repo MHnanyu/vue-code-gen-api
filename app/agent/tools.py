@@ -210,6 +210,10 @@ def create_tool_registry(
             image_source=image_source,
             is_base64=is_base64,
         )
+        save_stage_output(
+            "image_analysis", 0, result,
+            output_session_id, message_id, "md",
+        )
         return result
 
     attachment_names = list(_attachment_map.keys()) if _attachment_map else []

@@ -15,7 +15,7 @@ class StepMessage(BaseModel):
     message: Optional[str] = Field(default=None, description="该步骤的摘要/说明")
     status: Optional[str] = Field(default=None, description="执行状态（success/failed/skipped/cached）")
     outputType: Optional[str] = Field(default=None, description="产出类型（markdown/json/vue）")
-    filePath: Optional[str] = Field(default=None, description="产出文件路径")
+    filePath: Optional[str | List[str]] = Field(default=None, description="产出文件路径")
     duration: Optional[float] = Field(default=None, description="执行耗时（秒）")
     fileCategory: Optional[str] = Field(default=None, description="文件类别（file=单文件/files=文件数组）")
 
