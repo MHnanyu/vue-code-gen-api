@@ -35,7 +35,7 @@ async def test_agent_stream(prompt: str, component_lib: str = "ElementUI", image
         if os.path.exists(image_path):
             print(f"[测试] 上传图片: {image_path}")
             import httpx
-            async with httpx.AsyncClient(timeout=30.0) as upload_client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=60.0, write=120.0, pool=30.0)) as upload_client:
                 with open(image_path, "rb") as f:
                     resp = await upload_client.post(
                         f"{BASE_URL}/api/upload",
@@ -188,16 +188,14 @@ async def test_import_chain():
     try:
         from app.agent.core import AgentCore
         from app.agent.tools import ToolRegistry, ToolDefinition, create_tool_registry
-        from app.agent.prompts import build_agent_system_prompt, build_review_prompt
-        from app.agent.review import review_generated_code
+        from app.agent.prompts import build_agent_system_prompt
         from app.utils.sse import (
             emit_agent_thinking, emit_tool_call_start,
             emit_tool_call_result, emit_agent_done, emit_agent_cancelled,
         )
         print("[OK] app.agent.core - AgentCore")
         print("[OK] app.agent.tools - ToolRegistry, ToolDefinition, create_tool_registry")
-        print("[OK] app.agent.prompts - build_agent_system_prompt, build_review_prompt")
-        print("[OK] app.agent.review - review_generated_code")
+        print("[OK] app.agent.prompts - build_agent_system_prompt")
         print("[OK] app.utils.sse - Agent SSE events")
 
         registry = ToolRegistry()

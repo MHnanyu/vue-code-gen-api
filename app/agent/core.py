@@ -7,8 +7,7 @@ SuperDesign 使用 Vercel AI SDK 的 streamText({ maxSteps: 10 })，
 import asyncio
 import json
 import logging
-import os
-from typing import Any, AsyncGenerator
+from typing import AsyncGenerator
 
 import httpx
 
@@ -27,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_STEPS = 10
 TOOL_RESULT_MAX_CHARS = 4000
+TOOL_CONCURRENCY_LIMIT = 3
 
 
 class AgentCore:
@@ -42,6 +42,8 @@ class AgentCore:
         self.max_steps = max_steps or settings.AGENT_MAX_STEPS
         self._required_tools = tool_registry.get_required_tool_names()
         self._called_required: set[str] = set()
+        self._tool_results: dict[str, str] = {}
+        self._pruned_checkpoints: set[str] = set()
 
     def _get_base_url(self) -> str:
         url = settings.GLM5_API_URL
@@ -63,6 +65,9 @@ class AgentCore:
     ) -> AsyncGenerator[str, None]:
         self._output_session_id = output_session_id
         self._message_id = message_id
+        self._called_required = set()
+        self._tool_results = {}
+        self._pruned_checkpoints = set()
         messages = self._build_messages(user_prompt, session_context)
         tools = self.tool_registry.get_openai_tools()
 
@@ -75,13 +80,32 @@ class AgentCore:
             )
             return
 
+        async with httpx.AsyncClient(timeout=120.0) as llm_client:
+            async for event in self._run_loop(
+                messages, tools, llm_client,
+                user_prompt, session_context, task_id,
+                output_session_id, message_id,
+            ):
+                yield event
+
+    async def _run_loop(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        llm_client: httpx.AsyncClient,
+        user_prompt: str,
+        session_context: dict | None,
+        task_id: str | None,
+        output_session_id: str | None,
+        message_id: str | None,
+    ) -> AsyncGenerator[str, None]:
         for step in range(self.max_steps):
             if task_id and is_cancelled(task_id):
                 from app.utils.sse import emit_agent_cancelled
                 yield emit_agent_cancelled(step)
                 return
 
-            response = await self._call_llm(messages, tools)
+            response = await self._call_llm(messages, tools, client=llm_client)
 
             if response is None:
                 yield emit_error(
@@ -120,40 +144,12 @@ class AgentCore:
                 "tool_calls": tool_calls,
             })
 
-            for tc in tool_calls:
+            tool_events, tool_exec_results = await self._execute_tools_parallel(tool_calls, step)
+            for ev in tool_events:
+                yield ev
+            for tc, result, result_json in tool_exec_results:
                 tc_id = tc.get("id", "")
-                func = tc.get("function", {})
-                tool_name = func.get("name", "")
-
-                try:
-                    arguments = json.loads(func.get("arguments", "{}"))
-                except json.JSONDecodeError:
-                    arguments = {}
-
-                try:
-                    result = await self.tool_registry.execute(tool_name, arguments)
-                except Exception as e:
-                    result = {"error": str(e)}
-                    logger.error("工具执行失败: %s - %s", tool_name, e)
-
-                if (
-                    tool_name in self._required_tools
-                    and not (isinstance(result, dict) and "error" in result)
-                ):
-                    self._called_required.add(tool_name)
-
-                yield emit_tool_call_result(
-                    tool_name=tool_name,
-                    result=result,
-                    step=step,
-                )
-
-                result_json = json.dumps(result, ensure_ascii=False)
-                if len(result_json) > TOOL_RESULT_MAX_CHARS:
-                    result_json = (
-                        result_json[:TOOL_RESULT_MAX_CHARS]
-                        + f"\n\n[结果已截断，原始长度 {len(result_json)} 字符]"
-                    )
+                tool_name = tc.get("function", {}).get("name", "")
 
                 messages.append({
                     "role": "tool",
@@ -161,14 +157,9 @@ class AgentCore:
                     "content": result_json,
                 })
 
-            if self._required_tools and self._called_required >= set(self._required_tools):
-                if finish_reason == "tool_calls":
-                    pass
-                else:
-                    logger.info(
-                        "Agent 所有必须工具已调用完毕（步骤 %d），等待 LLM 最终回复",
-                        step,
-                    )
+                self._tool_results[tool_name] = result_json
+
+            messages = self._maybe_prune(messages, step)
 
         missing = set(self._required_tools) - self._called_required
         if missing:
@@ -187,6 +178,58 @@ class AgentCore:
         else:
             logger.warning("Agent 达到最大步数限制 (%d)，已调用所有必须工具", self.max_steps)
             yield emit_agent_done(files=self._extract_files(messages))
+
+    async def _execute_tools_parallel(
+        self,
+        tool_calls: list[dict],
+        step: int,
+    ) -> tuple[list[str], list[tuple[dict, dict, str]]]:
+        semaphore = asyncio.Semaphore(TOOL_CONCURRENCY_LIMIT)
+
+        async def _run_single(tc: dict) -> tuple[dict, dict, str]:
+            async with semaphore:
+                tc_id = tc.get("id", "")
+                func = tc.get("function", {})
+                tool_name = func.get("name", "")
+
+            try:
+                arguments = json.loads(func.get("arguments", "{}"))
+            except json.JSONDecodeError:
+                arguments = {}
+
+            try:
+                result = await self.tool_registry.execute(tool_name, arguments)
+            except Exception as e:
+                result = {"error": str(e)}
+                logger.error("工具执行失败: %s - %s", tool_name, e)
+
+            if (
+                tool_name in self._required_tools
+                and not (isinstance(result, dict) and "error" in result)
+            ):
+                self._called_required.add(tool_name)
+
+            result_json = json.dumps(result, ensure_ascii=False)
+            if len(result_json) > TOOL_RESULT_MAX_CHARS:
+                result_json = (
+                    result_json[:TOOL_RESULT_MAX_CHARS]
+                    + f"\n\n[结果已截断，原始长度 {len(result_json)} 字符]"
+                )
+
+            return tc, result, result_json
+
+        results = await asyncio.gather(*[_run_single(tc) for tc in tool_calls])
+        events: list[str] = []
+
+        for tc, result, _ in results:
+            tool_name = tc.get("function", {}).get("name", "")
+            events.append(emit_tool_call_result(
+                tool_name=tool_name,
+                result=result,
+                step=step,
+            ))
+
+        return events, list(results)
 
     def _build_messages(self, user_prompt: str, context: dict | None) -> list[dict]:
         system_prompt = self._build_system_prompt()
@@ -213,8 +256,55 @@ class AgentCore:
             required_tools=self._required_tools,
         )
 
+    def _estimate_messages_chars(self, messages: list[dict]) -> int:
+        return sum(len(json.dumps(m, ensure_ascii=False)) for m in messages)
+
+    def _maybe_prune(self, messages: list[dict], step: int) -> list[dict]:
+        both_ready = (
+            "normalize_requirement" in self._called_required
+            and "generate_vue_code" in self._called_required
+        )
+
+        if both_ready and "after_generate" not in self._pruned_checkpoints:
+            messages = self._prune_after_generate(messages)
+            self._pruned_checkpoints.add("after_normalize")
+            self._pruned_checkpoints.add("after_generate")
+            return messages
+
+        if "normalize_requirement" in self._called_required and "after_normalize" not in self._pruned_checkpoints:
+            messages = self._prune_after_normalize(messages)
+            self._pruned_checkpoints.add("after_normalize")
+
+        return messages
+
+    def _prune_after_normalize(self, messages: list[dict]) -> list[dict]:
+        req = self._tool_results.get("normalize_requirement", "")
+        if not req:
+            return messages
+        before = self._estimate_messages_chars(messages)
+        pruned = [
+            messages[0],
+            {"role": "user", "content": f"需求标准化已完成。以下是结构化 UX 文档：\n\n{req}"},
+        ]
+        after = self._estimate_messages_chars(pruned)
+        logger.info("上下文裁剪 [检查点 1]: %d → %d 字符 (移除原始输入和图片分析，保留标准化需求)", before, after)
+        return pruned
+
+    def _prune_after_generate(self, messages: list[dict]) -> list[dict]:
+        code = self._tool_results.get("generate_vue_code", "")
+        if not code:
+            return messages
+        before = self._estimate_messages_chars(messages)
+        pruned = [
+            messages[0],
+            {"role": "user", "content": f"代码生成已完成。以下是文件信息：\n\n{code}"},
+        ]
+        after = self._estimate_messages_chars(pruned)
+        logger.info("上下文裁剪 [检查点 2]: %d → %d 字符 (移除需求文档和规范查询，保留代码文件引用)", before, after)
+        return pruned
+
     async def _call_llm(
-        self, messages: list[dict], tools: list[dict]
+        self, messages: list[dict], tools: list[dict], client: httpx.AsyncClient
     ) -> dict | None:
         headers = {
             "Content-Type": "application/json",
@@ -235,10 +325,9 @@ class AgentCore:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    response = await client.post(api_url, headers=headers, json=payload)
-                    response.raise_for_status()
-                    data = response.json()
+                response = await client.post(api_url, headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
 
                 if "choices" not in data or len(data["choices"]) == 0:
                     logger.error("LLM 返回空 choices: %s", data)

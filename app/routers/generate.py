@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import time
@@ -676,13 +677,40 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
             all_files: list[GeneratedFile] = []
             step_messages: list[dict] = []
 
-            async for event in agent.run(
-                user_prompt=user_prompt,
-                task_id=message_id,
-                output_session_id=output_session_id,
-                message_id=message_id,
-            ):
-                yield event
+            _HEARTBEAT_INTERVAL = 30
+            _DONE = object()
+            _HEARTBEAT = ": ping\n\n"
+            queue: asyncio.Queue[object] = asyncio.Queue()
+
+            async def feed_agent():
+                try:
+                    async for event in agent.run(
+                        user_prompt=user_prompt,
+                        task_id=message_id,
+                        output_session_id=output_session_id,
+                        message_id=message_id,
+                    ):
+                        await queue.put(event)
+                finally:
+                    await queue.put(_DONE)
+
+            async def send_heartbeat():
+                while True:
+                    await asyncio.sleep(_HEARTBEAT_INTERVAL)
+                    await queue.put(_HEARTBEAT)
+
+            agent_task = asyncio.create_task(feed_agent())
+            hb_task = asyncio.create_task(send_heartbeat())
+
+            try:
+                while True:
+                    item = await queue.get()
+                    if item is _DONE:
+                        break
+                    yield item
+            finally:
+                hb_task.cancel()
+                agent_task.cancel()
 
             all_files = _load_final_files_as_generated(output_dir)
 

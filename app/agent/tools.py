@@ -391,7 +391,6 @@ def create_tool_registry(
 
     # ── 工具 6: UX 优化 ──
     async def optimize_ux(args: dict) -> dict:
-        from app.services.ai_factory import AIServiceFactory
         from app.prompts import get_optimization_prompt
 
         existing_files = args.get("files", [])
