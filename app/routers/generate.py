@@ -78,6 +78,40 @@ def _build_prev_duration_map(pre_stages: dict) -> dict[str, float | None]:
     }
 
 
+async def _check_session_mode(session_id: str | None, expected_mode: str, db) -> None:
+    if not session_id or db is None:
+        return
+    session = await db.sessions.find_one({"id": session_id}, {"mode": 1})
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": ErrorCode.SESSION_NOT_FOUND,
+                "message": "会话不存在",
+                "data": None,
+            },
+        )
+    actual_mode = session.get("mode")
+    if not actual_mode:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": ErrorCode.INTERNAL_ERROR,
+                "message": "会话数据异常：缺少 mode 字段，请联系管理员修复",
+                "data": None,
+            },
+        )
+    if actual_mode != expected_mode:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": ErrorCode.PARAM_ERROR,
+                "message": f"该会话为 {actual_mode} 模式，不支持调用 {expected_mode} 接口，请使用 /api/generate/{actual_mode}/stream",
+                "data": None,
+            },
+        )
+
+
 def _make_error_vue_page(title: str, description: str, prompt: str) -> GeneratedFile:
     escaped_prompt = prompt.replace('"', '\\"')
     return GeneratedFile(
@@ -488,6 +522,9 @@ async def cancel_generation(taskId: str):
 async def generate_initial_stream(body: GenerateInitialRequest, request: Request):
     logger.info(f"[SSE] 收到初始生成请求 - sessionId: {body.sessionId}, prompt长度: {len(body.prompt)}, fromStep: {body.fromStep}")
 
+    db = get_database() if body.sessionId else None
+    await _check_session_mode(body.sessionId, "pipeline", db)
+
     from_step = body.fromStep
     if from_step is not None:
         if from_step not in (0, 1, 2, 3):
@@ -501,7 +538,6 @@ async def generate_initial_stream(body: GenerateInitialRequest, request: Request
                 detail={"code": ErrorCode.PARAM_ERROR, "message": "使用 fromStep 重试时必须提供 sessionId", "data": None},
             )
 
-    db = get_database() if body.sessionId else None
     ctx = await _build_initial_context(body, request, db)
 
     if settings.MOCK_MODE:
@@ -662,6 +698,7 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
     os.makedirs(output_dir, exist_ok=True)
 
     db = get_database() if body.sessionId else None
+    await _check_session_mode(body.sessionId, "agent", db)
 
     import base64 as _base64
 
@@ -771,7 +808,7 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
                 "status": "success",
             })
 
-            if db and body.sessionId:
+            if db is not None and body.sessionId:
                 try:
                     await update_session_with_ai_message(
                         db=db,

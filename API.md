@@ -565,7 +565,8 @@ POST /api/sessions
 ```json
 {
   "title": "登录页面设计",
-  "componentLib": "ElementUI"
+  "componentLib": "ElementUI",
+  "mode": "pipeline"
 }
 ```
 
@@ -573,6 +574,7 @@ POST /api/sessions
 |------|------|------|------|
 | title | string | 否 | 会话标题 |
 | componentLib | string | 否 | 组件库：`ElementUI` / `aui` / `ccui` |
+| mode | string | **是** | 会话模式：`pipeline` 或 `agent`，创建后不可更改 |
 
 **响应**
 
@@ -584,6 +586,7 @@ POST /api/sessions
     "userId": null,
     "title": "登录页面设计",
     "componentLib": "ElementUI",
+    "mode": "pipeline",
     "messages": [],
     "files": [],
     "createdAt": "2025-01-15T10:30:00Z",
@@ -912,6 +915,7 @@ DELETE /api/sessions/{sessionId}/messages/{messageId}
 | userId | string / null | 用户 ID（预留，当前为 null） |
 | title | string / null | 会话标题 |
 | componentLib | string / null | 组件库：`ElementUI` / `aui` / `ccui` |
+| mode | string | 会话模式：`pipeline` 或 `agent`（必填，创建后不可更改） |
 | messages | Message[] | 消息列表 |
 | files | CodeFile[] | 最新生成的文件快照 |
 | createdAt | datetime (UTC) | 创建时间 |

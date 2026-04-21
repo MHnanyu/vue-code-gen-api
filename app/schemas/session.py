@@ -6,6 +6,7 @@ from app.schemas.generate import Attachment
 
 
 ComponentLib = Literal['ElementUI', 'aui', 'ccui']
+SessionMode = Literal['pipeline', 'agent']
 
 
 class StepMessage(BaseModel):
@@ -33,6 +34,7 @@ class Message(BaseModel):
 class SessionCreate(BaseModel):
     title: Optional[str] = None
     componentLib: Optional[ComponentLib] = None
+    mode: SessionMode
 
 
 class SessionUpdate(BaseModel):
@@ -44,6 +46,7 @@ class Session(BaseModel):
     userId: Optional[str] = None
     title: Optional[str] = None
     componentLib: Optional[ComponentLib] = None
+    mode: SessionMode
     messages: List[Message] = []
     files: Optional[List[CodeFile]] = Field(default_factory=list)
     createdAt: datetime = Field(default_factory=datetime.utcnow)
@@ -55,6 +58,7 @@ class SessionListItem(BaseModel):
     userId: Optional[str] = None
     title: Optional[str] = None
     componentLib: Optional[ComponentLib] = None
+    mode: SessionMode
     createdAt: datetime
     updatedAt: datetime
 

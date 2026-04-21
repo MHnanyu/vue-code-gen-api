@@ -23,6 +23,7 @@ async def create_session(body: SessionCreate):
         id=str(uuid4()),
         title=body.title,
         componentLib=body.componentLib,
+        mode=body.mode,
         messages=[],
         createdAt=now,
         updatedAt=now

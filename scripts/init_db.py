@@ -68,5 +68,32 @@ def init_database():
     print("  - users.username (唯一)")
 
 
+def backfill_session_mode():
+    client = MongoClient(settings.MONGODB_URL)
+    db = client[settings.DATABASE_NAME]
+    sessions = db["sessions"]
+
+    total = sessions.count_documents({})
+    missing = sessions.count_documents({"mode": {"$exists": False}})
+
+    print(f"总 session 数: {total}")
+    print(f"缺少 mode 字段: {missing}")
+
+    if missing > 0:
+        result = sessions.update_many(
+            {"mode": {"$exists": False}},
+            {"$set": {"mode": "pipeline"}},
+        )
+        print(f"已补全: matched={result.matched_count}, modified={result.modified_count}")
+    else:
+        print("无需补全，所有 session 均已有 mode 字段")
+
+    client.close()
+
+
 if __name__ == "__main__":
-    init_database()
+    import sys
+    if "--mode-backfill" in sys.argv:
+        backfill_session_mode()
+    else:
+        init_database()
