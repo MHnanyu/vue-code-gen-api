@@ -23,6 +23,7 @@ from app.utils.sse import (
     emit_error, emit_cancelled, emit_done,
     emit_agent_thinking, emit_tool_call_start,
     emit_tool_call_result, emit_agent_done, emit_agent_cancelled,
+    emit_agent_files,
 )
 from app.utils.output import (
     load_stage_output, save_stage_output, save_vue_files_from_json,
@@ -129,6 +130,51 @@ def _load_final_files_as_generated(output_dir: str) -> list[GeneratedFile]:
             content=f.get("content", ""),
         ))
     return result
+
+
+def _scan_latest_vue_files(output_dir: str) -> list[dict]:
+    """Scan the latest Vue output directory and return file list with download URLs."""
+    if not os.path.isdir(output_dir):
+        return []
+
+    candidates = []
+    try:
+        for entry in os.listdir(output_dir):
+            entry_path = os.path.join(output_dir, entry)
+            if os.path.isdir(entry_path) and entry.endswith("_vue"):
+                candidates.append(entry_path)
+    except OSError:
+        return []
+
+    if not candidates:
+        return []
+
+    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    latest_dir = candidates[0]
+
+    rel_dir = latest_dir.replace("\\", "/")
+    if rel_dir.startswith("/"):
+        rel_dir = rel_dir[1:]
+
+    files = []
+    for filename in os.listdir(latest_dir):
+        if not filename.endswith(".vue"):
+            continue
+        filepath = os.path.join(latest_dir, filename)
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+            files.append({
+                "name": filename,
+                "path": f"/src/{filename}",
+                "downloadUrl": f"/output/{rel_dir}/{filename}",
+                "lines": content.count("\n") + 1,
+                "sizeBytes": len(content.encode("utf-8")),
+            })
+        except Exception as e:
+            logger.warning("[Agent] 读取 Vue 文件失败 %s: %s", filepath, e)
+
+    return files
 
 
 async def _build_initial_context(
@@ -711,6 +757,10 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
             finally:
                 hb_task.cancel()
                 agent_task.cancel()
+
+            vue_file_urls = _scan_latest_vue_files(output_dir)
+            if vue_file_urls:
+                yield emit_agent_files(vue_file_urls)
 
             all_files = _load_final_files_as_generated(output_dir)
 

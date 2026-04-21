@@ -146,13 +146,17 @@ def emit_tool_call_result(
     tool_name: str,
     result: dict,
     step: int,
+    output_url: str | None = None,
 ) -> str:
-    return _sse_event("tool_call_result", {
+    data: dict[str, Any] = {
         "toolName": tool_name,
         "result": result,
         "step": step,
         "timestamp": _now_iso(),
-    })
+    }
+    if output_url is not None:
+        data["outputUrl"] = output_url
+    return _sse_event("tool_call_result", data)
 
 
 def emit_agent_done(files: list | None = None) -> str:
@@ -165,5 +169,12 @@ def emit_agent_done(files: list | None = None) -> str:
 def emit_agent_cancelled(cancelled_at_step: int) -> str:
     return _sse_event("agent_cancelled", {
         "cancelledAtStep": cancelled_at_step,
+        "timestamp": _now_iso(),
+    })
+
+
+def emit_agent_files(files: list[dict]) -> str:
+    return _sse_event("agent_files", {
+        "files": files,
         "timestamp": _now_iso(),
     })

@@ -151,6 +151,7 @@ class ToolCallResultEvent(BaseModel):
     toolName: str
     result: Optional[Any] = None
     step: int
+    outputUrl: Optional[str] = None
     timestamp: str
 
 
@@ -161,4 +162,9 @@ class AgentDoneEvent(BaseModel):
 
 class AgentCancelledEvent(BaseModel):
     cancelledAtStep: int
+    timestamp: str
+
+
+class AgentFilesEvent(BaseModel):
+    files: List[dict]
     timestamp: str

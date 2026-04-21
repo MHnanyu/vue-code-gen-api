@@ -111,6 +111,7 @@ async def test_agent_stream(prompt: str, component_lib: str = "ElementUI", image
                         elif current_event_type == "tool_call_result":
                             tool = data.get("toolName", "?") if isinstance(data, dict) else "?"
                             result = data.get("result", {}) if isinstance(data, dict) else {}
+                            output_url = data.get("outputUrl") if isinstance(data, dict) else None
                             if isinstance(result, dict):
                                 status = result.get("status", "N/A")
                                 file_count = result.get("file_count", "N/A")
@@ -133,6 +134,8 @@ async def test_agent_stream(prompt: str, component_lib: str = "ElementUI", image
                                     print(f"                   (已截断，共 {len(result_str)} 字符)")
                                 else:
                                     print(f"         ✅ Result: {result_str}")
+                            if output_url:
+                                print(f"         📎 Output: {output_url}")
                         elif current_event_type == "agent_done":
                             files = data.get("files", []) if isinstance(data, dict) else []
                             print(f"\n{'='*60}")
@@ -142,6 +145,12 @@ async def test_agent_stream(prompt: str, component_lib: str = "ElementUI", image
                                 print(f"  - {f.get('name', '?')} ({f.get('lines', '?')} 行, {f.get('size_bytes', '?')} bytes)")
                             if len(files) > 5:
                                 print(f"  ... 还有 {len(files) - 5} 个文件")
+                        elif current_event_type == "agent_files":
+                            files = data.get("files", []) if isinstance(data, dict) else []
+                            print(f"\n[文件列表] 共 {len(files)} 个文件:")
+                            for f in files:
+                                dl_url = f.get("downloadUrl", "?")
+                                print(f"  - {f.get('name', '?')} ({f.get('lines', '?')} 行, {f.get('sizeBytes', '?')} bytes) -> {dl_url}")
                         elif current_event_type == "agent_cancelled":
                             step = data.get("cancelledAtStep", "?") if isinstance(data, dict) else "?"
                             print(f"\n[取消] Agent Cancelled at step {step}")
@@ -192,6 +201,7 @@ async def test_import_chain():
         from app.utils.sse import (
             emit_agent_thinking, emit_tool_call_start,
             emit_tool_call_result, emit_agent_done, emit_agent_cancelled,
+            emit_agent_files,
         )
         print("[OK] app.agent.core - AgentCore")
         print("[OK] app.agent.tools - ToolRegistry, ToolDefinition, create_tool_registry")
