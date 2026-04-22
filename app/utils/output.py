@@ -216,7 +216,7 @@ async def update_session_with_ai_message(
         update_result = await db.sessions.update_one(
             {"id": session_id},
             {
-                "$push": {"messages": ai_msg.model_dump()},
+                "$push": {"messages": ai_msg.model_dump(exclude_none=True)},
                 "$set": {
                     "updatedAt": now,
                     "files": files_dump,
@@ -242,9 +242,6 @@ async def upsert_session_message(
     content: str,
     files: list[dict] | None = None,
     tool_calls: list[dict] | None = None,
-    failed_step: int | None = None,
-    stages: dict | None = None,
-    step_messages: list[dict] | None = None,
 ):
     """Insert a message on first call, then update in-place on subsequent calls.
 
@@ -258,7 +255,6 @@ async def upsert_session_message(
     from app.schemas.session import Message
 
     now = datetime.utcnow()
-    stage_dump = {k: v.model_dump() if hasattr(v, "model_dump") else v for k, v in stages.items()} if stages else None
 
     existing = await db.sessions.find_one(
         {"id": session_id, "messages.id": message_id},
@@ -268,14 +264,12 @@ async def upsert_session_message(
     if existing:
         update_fields = {
             "messages.$.content": content,
-            "messages.$.failedStep": failed_step,
             "messages.$.toolCalls": tool_calls,
+            "messages.$.failedStep": None,
+            "messages.$.stages": None,
+            "messages.$.stepMessages": None,
             "updatedAt": now,
         }
-        if stage_dump is not None:
-            update_fields["messages.$.stages"] = stage_dump
-        if step_messages is not None:
-            update_fields["messages.$.stepMessages"] = step_messages
         if files is not None:
             update_fields["files"] = files
         await db.sessions.update_one(
@@ -287,13 +281,10 @@ async def upsert_session_message(
             id=message_id,
             role="assistant",
             content=content,
-            failedStep=failed_step,
-            stages=stage_dump,
-            stepMessages=step_messages,
             toolCalls=tool_calls,
             files=files,
         )
-        push_fields: dict = {"messages": ai_msg.model_dump()}
+        push_fields: dict = {"messages": ai_msg.model_dump(exclude_none=True)}
         set_fields: dict = {"updatedAt": now}
         if files is not None:
             set_fields["files"] = files
@@ -408,7 +399,7 @@ async def write_retry_initial_message(
     await db.sessions.update_one(
         {"id": session_id},
         {
-            "$push": {"messages": msg.model_dump()},
+            "$push": {"messages": msg.model_dump(exclude_none=True)},
             "$set": {"updatedAt": now},
         }
     )

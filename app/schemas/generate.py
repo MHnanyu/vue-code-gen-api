@@ -136,7 +136,7 @@ class CancelledEvent(BaseModel):
 
 class AgentThinkingEvent(BaseModel):
     content: str
-    step: int
+    taskId: Optional[str] = None
     timestamp: str
 
 
@@ -164,7 +164,6 @@ class AgentDoneEvent(BaseModel):
 
 
 class AgentCancelledEvent(BaseModel):
-    cancelledAtStep: int
     timestamp: str
 
 

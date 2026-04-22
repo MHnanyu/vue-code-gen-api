@@ -124,8 +124,15 @@ class AgentCore:
             tool_calls = response.get("tool_calls", [])
             finish_reason = response.get("finish_reason", "")
 
+            logger.info(
+                "[Agent] 步骤 %d: content_len=%d, tool_calls=%d, finish_reason=%s",
+                step, len(content_text) if content_text else 0, len(tool_calls), finish_reason,
+            )
+
             if content_text:
                 yield emit_agent_thinking(content_text, task_id=task_id)
+            elif not tool_calls:
+                logger.warning("[Agent] 步骤 %d: content 和 tool_calls 均为空", step)
 
             if not tool_calls:
                 logger.info(
@@ -136,9 +143,11 @@ class AgentCore:
 
             for tc in tool_calls:
                 func = tc.get("function", {})
+                tc_id = tc.get("id", "")
                 yield emit_tool_call_start(
                     tool_name=func.get("name", ""),
                     arguments=func.get("arguments", "{}"),
+                    tool_call_id=tc_id,
                 )
 
             messages.append({
@@ -187,10 +196,10 @@ class AgentCore:
         import time as _time
         semaphore = asyncio.Semaphore(TOOL_CONCURRENCY_LIMIT)
 
-        async def _run_single(tc: dict) -> tuple[dict, dict, str, str | None, str, float]:
+        async def _run_single(tc: dict) -> tuple[dict, dict, str, str | None, str, float, str | None]:
             start = _time.time()
+            tc_id = tc.get("id", "")
             async with semaphore:
-                tc_id = tc.get("id", "")
                 func = tc.get("function", {})
                 tool_name = func.get("name", "")
                 arguments = func.get("arguments", "{}")
@@ -221,11 +230,11 @@ class AgentCore:
             output_info = self._build_output_info(tool_name)
             duration = round(_time.time() - start, 2)
 
-            return tc, result, result_json, output_info, arguments, status, message, duration
+            return tc, result, result_json, output_info, arguments, status, message, duration, tc_id
         results = await asyncio.gather(*[_run_single(tc) for tc in tool_calls])
         events: list[str] = []
 
-        for tc, result, _, output_info, arguments, status, message, duration in results:
+        for tc, result, _, output_info, arguments, status, message, duration, tc_id in results:
             tool_name = tc.get("function", {}).get("name", "")
             events.append(emit_tool_call_result(
                 tool_name=tool_name,
@@ -235,9 +244,10 @@ class AgentCore:
                 message=message,
                 output_info=output_info,
                 duration=duration,
+                tool_call_id=tc_id,
             ))
 
-        return events, [(tc, res, rj) for tc, res, rj, _, _, _, _, _ in results]
+        return events, [(tc, res, rj) for tc, res, rj, _, _, _, _, _, _ in results]
 
     _TOOL_OUTPUT_MAP = {
         "normalize_requirement": ("step1_requirement.md", "file", "text"),

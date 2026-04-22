@@ -93,21 +93,19 @@ async def test_agent_stream(prompt: str, component_lib: str = "ElementUI", image
 
                         if current_event_type == "agent_thinking":
                             content = data.get("content", "") if isinstance(data, dict) else str(data)
-                            step = data.get("step", "?") if isinstance(data, dict) else "?"
                             if len(content) > 200:
-                                print(f"[Step {step}] 💭 Thinking: {content[:200]}...\n         (已截断，共 {len(content)} 字符)")
+                                print(f"  💭 Thinking: {content[:200]}...\n         (已截断，共 {len(content)} 字符)")
                             else:
-                                print(f"[Step {step}] 💭 Thinking: {content}")
+                                print(f"  💭 Thinking: {content}")
                         elif current_event_type == "tool_call_start":
                             tool = data.get("toolName", "?") if isinstance(data, dict) else "?"
-                            step = data.get("step", "?") if isinstance(data, dict) else "?"
                             args_raw = data.get("arguments", "{}") if isinstance(data, dict) else "{}"
                             try:
                                 args = json.loads(args_raw)
                                 args_preview = json.dumps(args, ensure_ascii=False)[:100]
                             except Exception:
                                 args_preview = args_raw[:100]
-                            print(f"[Step {step}] 🔧 Tool Call: {tool}({args_preview})")
+                            print(f"  🔧 Tool Call: {tool}({args_preview})")
                         elif current_event_type == "tool_call_result":
                             tool = data.get("toolName", "?") if isinstance(data, dict) else "?"
                             result = data.get("result", {}) if isinstance(data, dict) else {}
@@ -153,8 +151,7 @@ async def test_agent_stream(prompt: str, component_lib: str = "ElementUI", image
                                 dl_url = f.get("downloadUrl", "?")
                                 print(f"  - {f.get('name', '?')} ({f.get('lines', '?')} 行, {f.get('sizeBytes', '?')} bytes) -> {dl_url}")
                         elif current_event_type == "agent_cancelled":
-                            step = data.get("cancelledAtStep", "?") if isinstance(data, dict) else "?"
-                            print(f"\n[取消] Agent Cancelled at step {step}")
+                            print(f"\n[取消] Agent Cancelled")
                         elif current_event_type == "error":
                             msg = data.get("message", "") if isinstance(data, dict) else str(data)
                             print(f"\n[错误] {msg}")

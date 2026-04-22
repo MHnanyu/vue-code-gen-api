@@ -134,12 +134,16 @@ def emit_agent_thinking(content: str, task_id: str | None = None) -> str:
 def emit_tool_call_start(
     tool_name: str,
     arguments: str,
+    tool_call_id: str | None = None,
 ) -> str:
-    return _sse_event("tool_call_start", {
+    data: dict[str, Any] = {
         "toolName": tool_name,
         "arguments": arguments,
         "timestamp": _now_iso(),
-    })
+    }
+    if tool_call_id is not None:
+        data["toolCallId"] = tool_call_id
+    return _sse_event("tool_call_start", data)
 
 
 def emit_tool_call_result(
@@ -150,6 +154,7 @@ def emit_tool_call_result(
     message: str | None = None,
     output_info: tuple[list[str], str] | None = None,
     duration: float | None = None,
+    tool_call_id: str | None = None,
 ) -> str:
     data: dict[str, Any] = {
         "toolName": tool_name,
@@ -160,6 +165,8 @@ def emit_tool_call_result(
         "duration": duration,
         "timestamp": _now_iso(),
     }
+    if tool_call_id is not None:
+        data["toolCallId"] = tool_call_id
     if output_info is not None:
         paths, render_type = output_info
         data["outputPaths"] = paths

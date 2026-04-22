@@ -223,10 +223,16 @@ async def _collect_and_persist_step(
             return
 
         if event_type == "agent_thinking":
+            content = data.get("content", "")
+            logger.debug(
+                "[Agent] 收到 agent_thinking: len=%d, thinking_contents=%s",
+                len(content), "is None" if thinking_contents is None else f"len={len(thinking_contents)}",
+            )
             if thinking_contents is not None:
-                content = data.get("content", "")
                 if content:
                     thinking_contents.append(content)
+                else:
+                    logger.warning("[Agent] agent_thinking 事件 content 为空")
             if db is not None and session_id and thinking_contents:
                 joined = "\n".join(thinking_contents)
                 await upsert_session_message(
@@ -318,7 +324,7 @@ def _scan_latest_vue_files(output_dir: str) -> list[dict]:
         files.append({
             "name": filename,
             "path": df.get("path", f"/src/{filename}"),
-            "downloadUrl": f"/output/{rel_dir}/{filename}",
+            "downloadUrl": f"/{rel_dir}/{filename}",
             "lines": df.get("lines", 0),
             "sizeBytes": df.get("size_bytes", 0),
         })
@@ -803,26 +809,16 @@ async def analyze_image_file(file: UploadFile = File(...), prompt: Optional[str]
 @router.post("/generate/agent/stream")
 async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
     logger.info(
-        "[Agent SSE] 收到 Agent 生成请求 - sessionId: %s, componentLib: %s, prompt长度: %d, fromStep: %s",
-        body.sessionId, body.componentLib, len(body.prompt), body.fromStep,
+        "[Agent SSE] 收到 Agent 生成请求 - sessionId: %s, componentLib: %s, prompt长度: %d",
+        body.sessionId, body.componentLib, len(body.prompt),
     )
 
     output_session_id = body.sessionId or f"no_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    is_retry = body.fromStep is not None and 0 <= body.fromStep <= 3 and body.sessionId
 
     db = get_database() if body.sessionId else None
     await _check_session_mode(body.sessionId, "agent", db)
 
-    existing_message_id = None
-    if is_retry and db is not None:
-        existing_message_id, _ = await rollback_before_retry(db, body.sessionId, body.fromStep or 0)
-        if existing_message_id:
-            old_output_dir = os.path.join("output", output_session_id, existing_message_id)
-            if os.path.isdir(old_output_dir):
-                shutil.rmtree(old_output_dir, ignore_errors=True)
-                logger.info("[Agent SSE] 重试: 已清理旧产物目录 %s", old_output_dir)
-
-    message_id = existing_message_id or str(uuid4())
+    message_id = str(uuid4())
     output_dir = os.path.join("output", output_session_id, message_id)
     os.makedirs(output_dir, exist_ok=True)
 
@@ -962,7 +958,23 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
             elif _thinking_contents:
                 ai_message = "\n".join(_thinking_contents)
             else:
-                ai_message = "Agent 模式生成完成"
+                logger.warning(
+                    "[Agent SSE] _thinking_contents 为空，tool_calls=%d，将根据工具执行生成摘要",
+                    len(_tool_calls),
+                )
+                if _tool_calls:
+                    parts = []
+                    for tc in _tool_calls:
+                        name = tc.get("toolName", "")
+                        msg = tc.get("message", "")
+                        status = tc.get("status", "")
+                        if msg:
+                            parts.append(f"[{name}] {msg}")
+                        elif name:
+                            parts.append(f"[{name}] {status}")
+                    ai_message = "\n".join(parts) if parts else "Agent 模式生成完成"
+                else:
+                    ai_message = "Agent 模式生成完成"
 
             await _save_agent_result(
                 db, body.sessionId, message_id,
