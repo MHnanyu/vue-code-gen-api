@@ -81,14 +81,14 @@ def emit_stage_complete(
 def emit_error(
     code: int,
     message: str,
-    failed_step: int | None,
-    stages: dict[str, StageResult],
+    failed_step: int | None = None,
+    stages: dict[str, StageResult] | None = None,
 ) -> str:
     return _sse_event("error", {
         "code": code,
         "message": message,
         "failedStep": failed_step,
-        "stages": _dump_stages(stages),
+        "stages": _dump_stages(stages) if stages else {},
         "timestamp": _now_iso(),
     })
 
@@ -121,10 +121,9 @@ def emit_done(
     return _sse_event("done", data)
 
 
-def emit_agent_thinking(content: str, step: int, task_id: str | None = None) -> str:
+def emit_agent_thinking(content: str, task_id: str | None = None) -> str:
     data: dict[str, Any] = {
         "content": content,
-        "step": step,
         "timestamp": _now_iso(),
     }
     if task_id is not None:
@@ -135,32 +134,36 @@ def emit_agent_thinking(content: str, step: int, task_id: str | None = None) -> 
 def emit_tool_call_start(
     tool_name: str,
     arguments: str,
-    step: int,
 ) -> str:
     return _sse_event("tool_call_start", {
         "toolName": tool_name,
         "arguments": arguments,
-        "step": step,
         "timestamp": _now_iso(),
     })
 
 
 def emit_tool_call_result(
     tool_name: str,
+    arguments: str,
+    status: str,
     result: dict,
-    step: int,
+    message: str | None = None,
     output_info: tuple[list[str], str] | None = None,
+    duration: float | None = None,
 ) -> str:
     data: dict[str, Any] = {
         "toolName": tool_name,
+        "arguments": arguments,
+        "status": status,
         "result": result,
-        "step": step,
+        "message": message,
+        "duration": duration,
         "timestamp": _now_iso(),
     }
     if output_info is not None:
-        urls, output_type = output_info
-        data["outputUrls"] = urls
-        data["outputType"] = output_type
+        paths, render_type = output_info
+        data["outputPaths"] = paths
+        data["renderType"] = render_type
     return _sse_event("tool_call_result", data)
 
 
@@ -171,9 +174,8 @@ def emit_agent_done(files: list | None = None) -> str:
     return _sse_event("agent_done", data)
 
 
-def emit_agent_cancelled(cancelled_at_step: int) -> str:
+def emit_agent_cancelled() -> str:
     return _sse_event("agent_cancelled", {
-        "cancelledAtStep": cancelled_at_step,
         "timestamp": _now_iso(),
     })
 

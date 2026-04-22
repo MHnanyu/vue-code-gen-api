@@ -14,17 +14,19 @@ class StepMessage(BaseModel):
     stageName: str = Field(description="步骤名称")
     message: Optional[str] = Field(default=None, description="该步骤的摘要/说明")
     status: Optional[str] = Field(default=None, description="执行状态（success/failed/skipped/cached）")
-    outputType: Optional[str] = Field(default=None, description="产出类型（markdown/json/vue）")
-    filePath: Optional[str | List[str]] = Field(default=None, description="产出文件路径")
+    outputPaths: Optional[List[str]] = Field(default=None, description="产出文件相对路径列表")
+    renderType: Optional[str] = Field(default=None, description="前端渲染方式（text=直接展示/code=代码预览）")
     duration: Optional[float] = Field(default=None, description="执行耗时（秒）")
-    fileCategory: Optional[str] = Field(default=None, description="文件类别（file=单文件/files=文件数组）")
 
 
 class ToolCallMessage(BaseModel):
     toolName: str = Field(description="工具名称")
     arguments: Optional[str] = Field(default=None, description="调用参数（JSON字符串）")
     status: Optional[str] = Field(default=None, description="执行状态（success/failed）")
-    result: Optional[dict] = Field(default=None, description="执行结果摘要")
+    result: Optional[dict] = Field(default=None, description="执行结果")
+    message: Optional[str] = Field(default=None, description="用户展示的摘要说明")
+    outputPaths: Optional[List[str]] = Field(default=None, description="产出文件相对路径列表")
+    renderType: Optional[str] = Field(default=None, description="前端渲染方式（text=直接展示/code=代码预览）")
     duration: Optional[float] = Field(default=None, description="执行耗时（秒）")
     timestamp: Optional[str] = Field(default=None, description="调用时间")
 

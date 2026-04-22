@@ -280,7 +280,9 @@ def create_tool_registry(
 
     # ── 工具 3: 生成 Vue 代码 ──
     async def generate_vue_code(args: dict) -> dict:
-        prompt = args["requirement"]
+        from app.prompts import get_agent_generation_prompt
+
+        prompt = get_agent_generation_prompt(component_lib, args["requirement"])
         existing_files = args.get("existing_files")
 
         service = AIServiceFactory.get_service()
@@ -395,7 +397,7 @@ def create_tool_registry(
 
     # ── 工具 6: UX 优化 ──
     async def optimize_ux(args: dict) -> dict:
-        from app.prompts import get_optimization_prompt
+        from app.prompts import get_agent_optimization_prompt
 
         existing_files = args.get("files", [])
         if not existing_files:
@@ -407,7 +409,7 @@ def create_tool_registry(
 
         service = AIServiceFactory.get_service()
 
-        optimization_prompt = get_optimization_prompt(component_lib)
+        optimization_prompt = get_agent_optimization_prompt(component_lib)
 
         files_context = "\n\n".join([
             f"--- 文件: {f.get('name', 'unknown')} (id: {f.get('id', 'unknown')}) ---\n{f.get('content', '')}"

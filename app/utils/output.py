@@ -240,11 +240,11 @@ async def upsert_session_message(
     session_id: str,
     message_id: str,
     content: str,
-    failed_step: int | None,
-    stages: dict,
-    step_messages: list[dict] | None,
-    files: list[dict] | None,
+    files: list[dict] | None = None,
     tool_calls: list[dict] | None = None,
+    failed_step: int | None = None,
+    stages: dict | None = None,
+    step_messages: list[dict] | None = None,
 ):
     """Insert a message on first call, then update in-place on subsequent calls.
 
@@ -269,11 +269,13 @@ async def upsert_session_message(
         update_fields = {
             "messages.$.content": content,
             "messages.$.failedStep": failed_step,
-            "messages.$.stages": stage_dump,
-            "messages.$.stepMessages": step_messages,
             "messages.$.toolCalls": tool_calls,
             "updatedAt": now,
         }
+        if stage_dump is not None:
+            update_fields["messages.$.stages"] = stage_dump
+        if step_messages is not None:
+            update_fields["messages.$.stepMessages"] = step_messages
         if files is not None:
             update_fields["files"] = files
         await db.sessions.update_one(
@@ -301,8 +303,8 @@ async def upsert_session_message(
         )
 
     logger.info(
-        "Agent 步骤落表 - sessionId: %s, messageId: %s, steps: %d",
-        session_id, message_id, len(step_messages) if step_messages else 0,
+        "Agent 步骤落表 - sessionId: %s, messageId: %s, toolCalls: %d",
+        session_id, message_id, len(tool_calls) if tool_calls else 0,
     )
 
 

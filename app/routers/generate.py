@@ -209,113 +209,54 @@ def _parse_sse_event(event_str: str) -> tuple[str | None, dict | None]:
     return None, None
 
 
-_TOOL_STAGE_MAP = {
-    "analyze_image":          (0, "analyze_image",          "markdown"),
-    "normalize_requirement":  (1, "normalize_requirement",  "markdown"),
-    "generate_vue_code":      (2, "generate_vue_code",      "vue"),
-    "optimize_ux":            (3, "optimize_ux",            "vue"),
-}
-
-
-def _summarize_tool_result(result_data: dict, max_chars: int = 500) -> dict:
-    if not result_data:
-        return None
-    summary = {}
-    for k, v in result_data.items():
-        s = json.dumps(v, ensure_ascii=False) if not isinstance(v, str) else v
-        if len(s) > max_chars:
-            s = s[:max_chars] + f"...(truncated, total {len(s)} chars)"
-        summary[k] = s
-    return summary
-
-
 async def _collect_and_persist_step(
-    event_str: str,
-    step_messages: list[dict],
-    stages: dict[str, StageResult],
-    tool_start_times: dict[str, float],
-    tool_calls: list[dict],
-    cancel_info: dict,
-    db,
-    session_id: str | None,
-    message_id: str,
-):
-    event_type, data = _parse_sse_event(event_str)
-    if not event_type or not data:
-        return
+        event_str: str,
+        tool_calls: list[dict],
+        cancel_info: dict,
+        db,
+        session_id: str | None,
+        message_id: str,
+        thinking_contents: list[str] | None = None,
+    ):
+        event_type, data = _parse_sse_event(event_str)
+        if not event_type or not data:
+            return
 
-    if event_type == "tool_call_start":
-        tool_name = data.get("toolName", "")
-        tool_start_times[tool_name] = time.time()
-        tool_calls.append({
-            "toolName": tool_name,
-            "arguments": data.get("arguments"),
-            "timestamp": data.get("timestamp"),
-        })
-
-    elif event_type == "tool_call_result":
-        tool_name = data.get("toolName", "")
-        start_t = tool_start_times.pop(tool_name, None)
-        duration = round(time.time() - start_t, 2) if start_t else None
-
-        result_data = data.get("result")
-        is_error = isinstance(result_data, dict) and "error" in result_data
-        status = "failed" if is_error else "success"
-
-        for tc in tool_calls:
-            if tc.get("toolName") == tool_name and tc.get("status") is None:
-                tc["status"] = status
-                tc["duration"] = duration
-                tc["result"] = _summarize_tool_result(result_data) if result_data else None
-                break
-
-        mapped = _TOOL_STAGE_MAP.get(tool_name)
-        if mapped:
-            stage_num, stage_name, output_type = mapped
-
-            raw_urls = data.get("outputUrls")
-            if isinstance(raw_urls, list):
-                file_path = raw_urls[0] if len(raw_urls) == 1 else json.dumps(raw_urls, ensure_ascii=False)
-            else:
-                file_path = raw_urls
-            step_messages.append({
-                "stage": stage_num,
-                "stageName": stage_name,
-                "message": result_data.get("error", "") if is_error else f"{stage_name} 完成",
-                "status": status,
-                "outputType": output_type,
-                "filePath": file_path,
-                "fileCategory": data.get("outputType"),
-                "duration": duration,
-            })
-            stages[stage_name] = StageResult(
-                status=status,
-                duration=duration,
-                error=result_data.get("error") if is_error else None,
-            )
-
-            if db is not None and session_id:
+        if event_type == "agent_thinking":
+            if thinking_contents is not None:
+                content = data.get("content", "")
+                if content:
+                    thinking_contents.append(content)
+            if db is not None and session_id and thinking_contents:
+                joined = "\n".join(thinking_contents)
                 await upsert_session_message(
                     db=db,
                     session_id=session_id,
                     message_id=message_id,
-                    content="正在生成中...",
-                    failed_step=None,
-                    stages=stages,
-                    step_messages=step_messages,
-                    files=None,
+                    content=joined,
                     tool_calls=tool_calls,
                 )
 
-    elif event_type == "agent_cancelled":
-        cancel_info["cancelled"] = True
-        stages["agent"] = StageResult(status="cancelled")
+        elif event_type == "tool_call_result":
+            tool_calls.append(data)
+
+            if db is not None and session_id:
+                save_content = "\n".join(thinking_contents) if thinking_contents else "正在生成中..."
+                await upsert_session_message(
+                    db=db,
+                    session_id=session_id,
+                    message_id=message_id,
+                    content=save_content,
+                    tool_calls=tool_calls,
+                )
+
+        elif event_type == "agent_cancelled":
+            cancel_info["cancelled"] = True
 
 
 async def _save_agent_result(
     db, session_id: str | None, message_id: str,
-    files: list[GeneratedFile], step_messages: list[dict],
-    stages: dict[str, StageResult], failed_step: int | None,
+    files: list[GeneratedFile],
     ai_message: str,
     tool_calls: list[dict] | None = None,
 ):
@@ -327,9 +268,6 @@ async def _save_agent_result(
         session_id=session_id,
         message_id=message_id,
         content=ai_message,
-        failed_step=failed_step,
-        stages=stages,
-        step_messages=step_messages,
         files=files_dump,
         tool_calls=tool_calls,
     )
@@ -944,11 +882,9 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
 
     async def event_stream():
         register_cancel(message_id)
-        step_messages: list[dict] = []
-        stages: dict[str, StageResult] = {}
-        _tool_start_times: dict[str, float] = {}
         _cancel_info: dict = {"cancelled": False}
         _tool_calls: list[dict] = []
+        _thinking_contents: list[str] = []
         all_files: list[GeneratedFile] = []
 
         try:
@@ -993,8 +929,9 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
                     if item is _DONE:
                         break
                     await _collect_and_persist_step(
-                        item, step_messages, stages, _tool_start_times,
+                        item,
                         _tool_calls, _cancel_info, db, body.sessionId, message_id,
+                        thinking_contents=_thinking_contents,
                     )
                     yield item
             finally:
@@ -1004,7 +941,12 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
                     try:
                         await t
                     except (asyncio.CancelledError, Exception):
-                        pass
+                        if t is agent_task and not t.cancelled():
+                            logger.error(
+                                "[Agent SSE] agent_task 异常被静默捕获: %s",
+                                t.exception(),
+                                exc_info=t.exception(),
+                            )
 
             if _disconnected:
                 return
@@ -1016,15 +958,15 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
             all_files = _load_final_files_as_generated(output_dir)
 
             if _cancel_info["cancelled"]:
-                stages.setdefault("agent", StageResult(status="cancelled"))
                 ai_message = "用户取消了生成"
+            elif _thinking_contents:
+                ai_message = "\n".join(_thinking_contents)
             else:
-                stages.setdefault("agent", StageResult(status="success"))
                 ai_message = "Agent 模式生成完成"
 
             await _save_agent_result(
                 db, body.sessionId, message_id,
-                all_files, step_messages, stages, failed_step=None,
+                all_files,
                 ai_message=ai_message,
                 tool_calls=_tool_calls,
             )
@@ -1034,15 +976,13 @@ async def generate_agent_stream(body: GenerateInitialRequest, request: Request):
             yield emit_error(
                 code=ErrorCode.INTERNAL_ERROR,
                 message=f"Agent 执行异常: {str(e)}",
-                failed_step=None,
-                stages=stages,
             )
 
             try:
                 all_files = _load_final_files_as_generated(output_dir)
                 await _save_agent_result(
                     db, body.sessionId, message_id,
-                    all_files, step_messages, stages, failed_step=None,
+                    all_files,
                     ai_message=f"Agent 执行异常: {str(e)}",
                     tool_calls=_tool_calls,
                 )

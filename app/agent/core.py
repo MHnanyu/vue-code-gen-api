@@ -76,20 +76,15 @@ class AgentCore:
             yield emit_error(
                 code=500,
                 message="Agent 没有可用工具",
-                failed_step=0,
-                stages={},
             )
             return
 
         async with httpx.AsyncClient(timeout=120.0) as llm_client:
             try:
-                async for event in asyncio.wait_for(
-                    self._run_loop(
-                        messages, tools, llm_client,
-                        user_prompt, session_context, task_id,
-                        output_session_id, message_id,
-                    ),
-                    timeout=settings.AGENT_TIMEOUT,
+                async for event in self._run_loop(
+                    messages, tools, llm_client,
+                    user_prompt, session_context, task_id,
+                    output_session_id, message_id,
                 ):
                     yield event
             except asyncio.TimeoutError:
@@ -97,8 +92,6 @@ class AgentCore:
                 yield emit_error(
                     code=500,
                     message=f"Agent 执行超时 ({settings.AGENT_TIMEOUT} 秒)",
-                    failed_step=self.max_steps,
-                    stages={},
                 )
 
     async def _run_loop(
@@ -115,7 +108,7 @@ class AgentCore:
         for step in range(self.max_steps):
             if task_id and is_cancelled(task_id):
                 from app.utils.sse import emit_agent_cancelled
-                yield emit_agent_cancelled(step)
+                yield emit_agent_cancelled()
                 return
 
             response = await self._call_llm(messages, tools, client=llm_client)
@@ -123,9 +116,7 @@ class AgentCore:
             if response is None:
                 yield emit_error(
                     code=500,
-                    message=f"LLM 调用失败（步骤 {step}）",
-                    failed_step=step,
-                    stages={},
+                    message="LLM 调用失败",
                 )
                 return
 
@@ -134,7 +125,7 @@ class AgentCore:
             finish_reason = response.get("finish_reason", "")
 
             if content_text:
-                yield emit_agent_thinking(content_text, step, task_id=task_id)
+                yield emit_agent_thinking(content_text, task_id=task_id)
 
             if not tool_calls:
                 logger.info(
@@ -148,7 +139,6 @@ class AgentCore:
                 yield emit_tool_call_start(
                     tool_name=func.get("name", ""),
                     arguments=func.get("arguments", "{}"),
-                    step=step,
                 )
 
             messages.append({
@@ -157,7 +147,7 @@ class AgentCore:
                 "tool_calls": tool_calls,
             })
 
-            tool_events, tool_exec_results = await self._execute_tools_parallel(tool_calls, step)
+            tool_events, tool_exec_results = await self._execute_tools_parallel(tool_calls)
             for ev in tool_events:
                 yield ev
             for tc, result, result_json in tool_exec_results:
@@ -185,8 +175,6 @@ class AgentCore:
                 yield emit_error(
                     code=500,
                     message=f"Agent 达到最大步数限制 ({self.max_steps})，且未完成必须步骤: {missing_names}",
-                    failed_step=self.max_steps,
-                    stages={},
                 )
         else:
             logger.warning("Agent 达到最大步数限制 (%d)，已调用所有必须工具", self.max_steps)
@@ -195,23 +183,20 @@ class AgentCore:
     async def _execute_tools_parallel(
         self,
         tool_calls: list[dict],
-        step: int,
     ) -> tuple[list[str], list[tuple[dict, dict, str]]]:
+        import time as _time
         semaphore = asyncio.Semaphore(TOOL_CONCURRENCY_LIMIT)
 
-        async def _run_single(tc: dict) -> tuple[dict, dict, str, str | None]:
+        async def _run_single(tc: dict) -> tuple[dict, dict, str, str | None, str, float]:
+            start = _time.time()
             async with semaphore:
                 tc_id = tc.get("id", "")
                 func = tc.get("function", {})
                 tool_name = func.get("name", "")
+                arguments = func.get("arguments", "{}")
 
             try:
-                arguments = json.loads(func.get("arguments", "{}"))
-            except json.JSONDecodeError:
-                arguments = {}
-
-            try:
-                result = await self.tool_registry.execute(tool_name, arguments)
+                result = await self.tool_registry.execute(tool_name, json.loads(arguments))
             except Exception as e:
                 result = {"error": str(e)}
                 logger.error("工具执行失败: %s - %s", tool_name, e)
@@ -222,6 +207,10 @@ class AgentCore:
             ):
                 self._called_required.add(tool_name)
 
+            is_error = isinstance(result, dict) and "error" in result
+            status = "failed" if is_error else "success"
+            message = result.get("error", "") if is_error else f"{tool_name} 完成"
+
             result_json = json.dumps(result, ensure_ascii=False)
             if len(result_json) > TOOL_RESULT_MAX_CHARS:
                 result_json = (
@@ -230,26 +219,30 @@ class AgentCore:
                 )
 
             output_info = self._build_output_info(tool_name)
+            duration = round(_time.time() - start, 2)
 
-            return tc, result, result_json, output_info
+            return tc, result, result_json, output_info, arguments, status, message, duration
         results = await asyncio.gather(*[_run_single(tc) for tc in tool_calls])
         events: list[str] = []
 
-        for tc, result, _, output_info in results:
+        for tc, result, _, output_info, arguments, status, message, duration in results:
             tool_name = tc.get("function", {}).get("name", "")
             events.append(emit_tool_call_result(
                 tool_name=tool_name,
+                arguments=arguments,
+                status=status,
                 result=result,
-                step=step,
+                message=message,
                 output_info=output_info,
+                duration=duration,
             ))
 
-        return events, [(tc, res, rj) for tc, res, rj, _ in results]
+        return events, [(tc, res, rj) for tc, res, rj, _, _, _, _, _ in results]
 
     _TOOL_OUTPUT_MAP = {
-        "normalize_requirement": ("step1_requirement.md", "file", "file"),
-        "generate_vue_code": ("step2_generation_vue", "directory", "files"),
-        "optimize_ux": ("step3_optimization_vue", "directory", "files"),
+        "normalize_requirement": ("step1_requirement.md", "file", "text"),
+        "generate_vue_code": ("step2_generation_vue", "directory", "code"),
+        "optimize_ux": ("step3_optimization_vue", "directory", "code"),
     }
 
     def _build_output_info(self, tool_name: str) -> tuple[list[str], str] | None:
@@ -258,15 +251,15 @@ class AgentCore:
             return None
         if not self._output_session_id or not self._message_id:
             return None
-        relative, kind, output_type = pattern
+        relative, kind, render_type = pattern
         base = f"output/{self._output_session_id}/{self._message_id}"
         if kind == "file":
-            return [f"{base}/{relative}"], output_type
+            return [f"{base}/{relative}"], render_type
         dir_path = os.path.join(base, relative).replace("\\", "/")
         if not os.path.isdir(dir_path):
             return None
-        urls = [f"{dir_path}/{fname}" for fname in sorted(os.listdir(dir_path))]
-        return (urls, output_type) if urls else None
+        paths = [f"{dir_path}/{fname}" for fname in sorted(os.listdir(dir_path))]
+        return (paths, render_type) if paths else None
 
     def _build_messages(self, user_prompt: str, context: dict | None) -> list[dict]:
         system_prompt = self._build_system_prompt()

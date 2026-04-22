@@ -143,16 +143,18 @@ class AgentThinkingEvent(BaseModel):
 class ToolCallStartEvent(BaseModel):
     toolName: str
     arguments: str
-    step: int
     timestamp: str
 
 
 class ToolCallResultEvent(BaseModel):
     toolName: str
+    arguments: Optional[str] = None
+    status: str
     result: Optional[Any] = None
-    step: int
-    outputUrls: Optional[List[str]] = None
-    outputType: Optional[str] = None
+    message: Optional[str] = None
+    outputPaths: Optional[List[str]] = None
+    renderType: Optional[str] = None
+    duration: Optional[float] = None
     timestamp: str
 
 
